@@ -1325,6 +1325,7 @@ async def main():
                 with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(results, f, indent=2, ensure_ascii=False)
                 logger.info(f"Results saved to {output_file}")
+                logger.info("The overall score is calculated as the average of four main dimensions: schema understanding, task completion, tool usage, and planning effectiveness. Within each dimension (e.g., schema understanding), we first compute the mean across its sub-dimensions.")
             except Exception as save_error:
                 logger.error(f"Failed to save results to {output_file}: {save_error}")
   
