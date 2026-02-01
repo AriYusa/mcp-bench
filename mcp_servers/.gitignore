@@ -50,3 +50,5 @@ htmlcov/
 # Python egg info
 *.egg-info/
 .eggs/
+
+mcp_servers/api_key*

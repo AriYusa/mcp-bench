@@ -14,27 +14,10 @@
     "env": [],
     "cwd": "../wikipedia-mcp"
   },
-  "Google Maps": {
-    "cmd": "node dist/cli.js --port 3001",
-    "env": [
-      "GOOGLE_MAPS_API_KEY"
-    ],
-    "cwd": "../mcp-google-map",
-    "transport": "http",
-    "port": 3001,
-    "endpoint": "/mcp"
-  },
   "Bibliomantic": {
     "cmd": "python bibliomantic_server.py",
     "env": [],
     "cwd": "../bibliomantic-mcp-server"
-  },
-  "BioMCP": {
-    "cmd": "uv run biomcp run",
-    "env": [
-      "NCI_API_KEY"
-    ],
-    "cwd": "../biomcp"
   },
   "Call for Papers": {
     "cmd": "python server.py",
