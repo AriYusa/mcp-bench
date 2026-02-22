@@ -57,3 +57,4 @@ Thumbs.db
 .cache/
 
 mcp_servers/api_key*
+/mcp_servers/api_key
