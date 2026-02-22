@@ -11,52 +11,39 @@ Classes:
 import asyncio
 import json
 import logging
-from typing import Any, Optional, Tuple, Set
+from typing import Any, Optional, Tuple, Set, Type
 import json_repair
+import litellm
+from pydantic import BaseModel
+
+litellm.callbacks = ["langfuse_otel"]
+
 
 logger = logging.getLogger(__name__)
 
-MODELS_WITH_MAX_COMPLETION_TOKENS: Set[str] = {
-    "o1-preview", "o1-mini", "o4-mini", "o3-mini", "o3", 
-    "gpt-4o", "gpt-4o-mini", "gpt-5"
-}
-
 
 class LLMProvider:
-    """Universal LLM provider supporting multiple model types and providers.
+    """Universal LLM provider using LiteLLM for multiple model types and providers.
     
     This class provides a unified interface for interacting with various LLM
-    providers (Azure OpenAI, OpenAI, etc.) with built-in retry logic, error
-    handling, and token management.
+    providers via LiteLLM, with built-in retry logic, error handling, and
+    token management.
     
     Attributes:
-        client: The LLM client instance (e.g., AsyncAzureOpenAI)
-        deployment_name: Name of the model deployment
-        provider_type: Type of provider ('azure', 'openai', etc.)
+        model_name: Name of the model to use (LiteLLM format)
         
     Example:
-        >>> from openai import AsyncAzureOpenAI
-        >>> client = AsyncAzureOpenAI(...)
-        >>> provider = LLMProvider(client, "gpt-4o", "azure")
+        >>> provider = LLMProvider("anthropic/claude-sonnet-4-5-20250929")
         >>> response = await provider.get_completion("You are helpful", "Hello", 100)
     """
     
-    def __init__(
-        self, 
-        client: Any, 
-        deployment_name: str, 
-        provider_type: str = "azure"
-    ) -> None:
+    def __init__(self, model_name: str) -> None:
         """Initialize the LLM provider.
         
         Args:
-            client: The LLM client instance for API calls
-            deployment_name: Name of the model deployment to use
-            provider_type: Type of provider, defaults to 'azure'
+            model_name: Name of the model to use (LiteLLM format, e.g., 'azure/gpt-4o', 'anthropic/claude-sonnet-4-5-20250929')
         """
-        self.client = client
-        self.deployment_name: str = deployment_name
-        self.provider_type: str = provider_type
+        self.model_name: str = model_name
 
     def _is_token_limit_error(self, error_message: str) -> bool:
         """Check if the error is related to token limits.
@@ -144,37 +131,33 @@ class LLMProvider:
             Exception: If all retry attempts fail
         """
         
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Prepare LiteLLM parameters
         params = {
-            "model": self.deployment_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
+            "model": self.model_name,
+            "messages": messages,
         }
         
-        # Handle different token parameter names
-        if self.provider_type == "azure":
-            if self.deployment_name in MODELS_WITH_MAX_COMPLETION_TOKENS:
-                params["max_completion_tokens"] = max_tokens
-            else:
-                params["max_tokens"] = max_tokens
-        else:
-            params["max_tokens"] = max_tokens
+        params["max_tokens"] = max_tokens
         
         # Simple retry mechanism: 3 attempts with exponential backoff
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                logger.info(f"Generating completion using {self.deployment_name} (attempt {attempt + 1}/{max_attempts}, max_tokens: {max_tokens})")
+                logger.info(f"Generating completion using {self.model_name} (attempt {attempt + 1}/{max_attempts}, max_tokens: {max_tokens})")
                 
-                response = await self.client.chat.completions.create(**params)
+                response = await litellm.acompletion(**params)
                 content = response.choices[0].message.content
                 
                 if content is None or content.strip() == "":
                     raise ValueError("Empty content received from LLM")
                 
                 if attempt > 0:
-                    logger.info(f"Success on attempt {attempt + 1} for {self.deployment_name}")
+                    logger.info(f"Success on attempt {attempt + 1} for {self.model_name}")
                 
                 if return_usage and hasattr(response, 'usage') and response.usage:
                     usage_dict = {
@@ -188,11 +171,11 @@ class LLMProvider:
                 
             except Exception as e:
                 error_msg = str(e)
-                logger.warning(f"Attempt {attempt + 1}/{max_attempts} failed for {self.deployment_name}: {e}")
+                logger.warning(f"Attempt {attempt + 1}/{max_attempts} failed for {self.model_name}: {e}")
                 
                 # Check for content filter errors - fail fast, no retries
                 if self._is_content_filter_error(error_msg):
-                    logger.info(f"Content filter error detected for {self.deployment_name}, failing fast")
+                    logger.info(f"Content filter error detected for {self.model_name}, failing fast")
                     raise e
                 
                 # For other errors, wait before retry (except last attempt)
@@ -206,6 +189,89 @@ class LLMProvider:
         
         # This should never be reached due to the raise in the last attempt
         raise Exception("Unexpected completion flow")
+
+    async def get_completion_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        response_model: Type[BaseModel],
+    ) -> BaseModel:
+        """Get a structured completion using json_schema response_format if supported.
+
+        If the model supports response_schema (json_schema), the Pydantic model is passed
+        directly as response_format and the result is validated against it.
+        If not supported, falls back to plain text completion + JSON parsing + Pydantic
+        validation so callers always receive a response_model instance.
+
+        Args:
+            system_prompt: System message to set context
+            user_prompt: User's input prompt
+            max_tokens: Maximum tokens for the response
+            response_model: Pydantic model class that defines the expected output shape
+
+        Returns:
+            An instance of response_model populated with the LLM's output
+        """
+        # Check at runtime whether the model supports json_schema structured output
+        try:
+            model_supports_schema = litellm.supports_response_schema(model=self.model_name)
+        except Exception:
+            model_supports_schema = False
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        if model_supports_schema:
+            params = {
+                "model": self.model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "response_format": response_model,
+            }
+
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(
+                        f"Generating structured completion using {self.model_name} "
+                        f"(attempt {attempt + 1}/{max_attempts}, max_tokens: {max_tokens})"
+                    )
+                    response = await litellm.acompletion(**params)
+                    content = response.choices[0].message.content
+                    if content is None or content.strip() == "":
+                        raise ValueError("Empty content received from LLM")
+                    if attempt > 0:
+                        logger.info(f"Success on attempt {attempt + 1} for {self.model_name}")
+                    return response_model.model_validate_json(content.strip())
+
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.warning(
+                        f"Structured attempt {attempt + 1}/{max_attempts} failed for {self.model_name}: {e}"
+                    )
+                    if self._is_content_filter_error(error_msg):
+                        raise
+                    if attempt < max_attempts - 1:
+                        wait_time = 2 ** attempt
+                        logger.info(f"Waiting {wait_time} seconds before retry...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        raise
+
+            raise Exception("Unexpected structured completion flow")
+
+        else:
+            # Fallback: plain text completion + manual JSON parse + Pydantic validation
+            logger.info(
+                f"Model {self.model_name} does not support response_schema; "
+                "falling back to text completion with manual JSON parsing"
+            )
+            content = await self.get_completion(system_prompt, user_prompt, max_tokens)
+            data = self.clean_and_parse_json(content)
+            return response_model.model_validate(data)
 
     def clean_and_parse_json(self, raw_json: str) -> Any:
         """Clean and parse JSON response with enhanced error handling."""
