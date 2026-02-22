@@ -8,7 +8,11 @@ dependencies = [
     "fastmcp>=2.14.3",
     "google-adk[eval]>=1.23.0",
     "google-cloud-aiplatform[adk,agent-engines,evaluation]>=1.135.0",
+    "json-repair==0.47.4",
     "langfuse>=3.12.1",
     "litellm>=1.81.5",
     "openinference-instrumentation-google-adk>=0.1.8",
+    "opentelemetry-api>=1.37.0",
+    "opentelemetry-exporter-otlp>=1.37.0",
+    "opentelemetry-sdk>=1.37.0",
 ]
