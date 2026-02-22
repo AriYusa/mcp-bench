@@ -1,0 +1,35 @@
+{
+  "generation_info": {
+    "status": "completed"
+  },
+  "server_tasks": [
+    {
+        "server_name": "Unit Converter",
+        "tasks": [
+        {
+            "task_id": "unit_converter_000",
+            "task_description": "Comprehensive Reactor X Startup Readiness Check: You are provided with a set of sensor readings taken just before startup of Reactor X. Each sensor reading has a specified threshold in SI units. Your job is to:\n1. Verify that all needed unit types are supported by calling list_supported_units (unit_type null to get all types).\n2. Perform a batched conversion of all 14 sensor readings into their SI threshold units using convert_batch.  For each request include: value, from_unit, to_unit, conversion_type, and a unique request_id.\n3. Parse the batch response and for each sensor compare the converted value to its SI threshold:\n   - If converted_value ≥ threshold_value, status is PASS.\n   - If converted_value < threshold_value, status is FAIL.\n4. For any sensor that FAILs, invoke the corresponding individual conversion tool (e.g., convert_temperature for temperature failures, convert_pressure for pressure failures, etc.) with the same input parameters as in the batch to cross-validate the conversion result.\n5. Produce a final JSON report listing each sensor with fields: sensor_name, original_reading (value + unit), converted_value (with unit), threshold_value (with unit), status (PASS/FAIL), cross_validation (object with batch_value and individual_value if cross-validation was performed).\n\nSensors and thresholds:\n1. inlet_temperature: 350 °F → threshold 150 °C (temperature)\n2. inlet_pressure: 50 psi → threshold 350 kPa (pressure)\n3. reactor_length: 10 ft → threshold 5 m (length)\n4. catalyst_weight: 500 lb → threshold 200 kg (mass)\n5. tank_volume: 2000 gallon (imperial) → threshold 8 m³ (volume)\n6. data_buffer: 2 gigabyte → threshold 1500 megabyte (computer_data)\n7. heat_exchanger_area: 1000 ft² → threshold 90 m² (area)\n8. motor_power: 50 horsepower → threshold 40 kilowatt (power)\n9. reaction_time: 2 hours → threshold 6000 seconds (time)\n10. valve_angle: 0.25 turns → threshold 45 degrees (angle)\n11. conveyor_speed: 2 meters/second → threshold 4000 feet/minute (speed)\n12. valve_force: 500 pounds force → threshold 2000 newtons (force)\n13. fluid_density: 128 pounds per cubic foot → threshold 2000 kilograms per cubic meter (density)\n14. fuel_energy: 10000 Btu → threshold 12000 kilojoule (energy)\n\nProduce the report exactly as specified; do not request further information.",
+            "fuzzy_description": "Hey, I’m prepping for a Reactor X startup tomorrow and it’s stressing me out a bit. My boss handed me 14 different sensor readings, all in weird units, and I need to know if we meet the safety thresholds (which are all in SI or related metric units). Here’s what I’ve got:\n\n- Inlet temperature: 350 °F (threshold 150 °C)  \n- Inlet pressure: 50 psi (threshold 350 kPa)  \n- Reactor length: 10 ft (threshold 5 m)  \n- Catalyst weight: 500 lb (threshold 200 kg)  \n- Tank volume: 2000 imperial gal (threshold 8 m³)  \n- Data buffer: 2 GB (threshold 1500 MB)  \n- Heat-exchanger area: 1000 ft² (threshold 90 m²)  \n- Motor power: 50 hp (threshold 40 kW)  \n- Reaction time: 2 hours (threshold 6000 s)  \n- Valve angle: 0.25 turns (threshold 45 °)  \n- Conveyor speed: 2 m/s (threshold 4000 ft/min)  \n- Valve force: 500 lbf (threshold 2000 N)  \n- Fluid density: 128 lb/ft³ (threshold 2000 kg/m³)  \n- Fuel energy: 10000 Btu (threshold 12000 kJ)  \n\nCould you convert each reading into the same units as its threshold, then tell me for each one whether it passes (converted ≥ threshold) or fails? And if any come up as a fail, I’d really appreciate you doing a second check with a different conversion route—just to be absolutely sure we didn’t slip up on units. \n\nIt’d be awesome if you could bundle everything in a JSON summary that shows, for each sensor: its name, the original reading, the converted value with units, the threshold with units, pass/fail status, and the cross-validation details when you’ve done that extra check. I really need actual numbers on this—can’t go to my boss with just opinions. Thanks!\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+            "dependency_analysis": "Step 1: list_supported_units (unit_type = null) to fetch all supported unit lists for each conversion type. Step 2: convert_batch to convert all 14 readings in one go, using the supported units from step 1. The batch output contains individual converted values. Step 3: A decision point: for each converted value, compare against its SI threshold. This determines PASS/FAIL status. Step 4: For each sensor with status FAIL, trigger a second conversion call using the specific individual tool (convert_temperature, convert_pressure, convert_length, etc.), feeding it the exact same value/from_unit/to_unit as used in the batch. This cross-validation outputs individual_value. Step 5: Combine batch_value and individual_value (if any) for cross-validation and build the final report. The workflow is sequential up through batch conversion, then forks into parallel individual conversions for all failing sensors, then reconverges to assemble the final JSON report. All tools are on the same Unit Converter server; convert_batch output directly feeds the threshold checks, which in turn trigger conditional calls to the single-type conversion tools.",
+            "distraction_servers": [
+            "Car Price Evaluator",
+            "FruityVice",
+            "Game Trends",
+            "Google Maps",
+            "Medical Calculator",
+            "OKX Exchange",
+            "OpenAPI Explorer",
+            "Paper Search",
+            "Scientific Computing",
+            "Weather Data"
+            ]
+        }
+        ],
+        "servers": [
+            "Unit Converter"
+        ],
+        "combination_name": "Single Server: Unit Converter",
+        "combination_type": "single_server"
+    }
+]}
+    
