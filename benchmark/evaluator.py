@@ -9,11 +9,12 @@ import asyncio
 import logging
 import random
 import time
-from typing import List, Dict, Any, Optional, Protocol
+from typing import List, Dict, Any, Optional, Protocol, Type
 from collections import Counter
 from abc import ABC, abstractmethod
 import jsonschema
 from jsonschema import ValidationError
+from pydantic import BaseModel as PydanticBaseModel
 import config.config_loader as config_loader
 
 logger = logging.getLogger(__name__)
@@ -24,11 +25,36 @@ def safe_get(item, key, default=None):
         return item.get(key, default)
     else:
         return default
+class JudgeEvaluation(PydanticBaseModel):
+    """Structured output schema for LLM judge evaluation."""
+    task_fulfillment_reasoning: str
+    grounding_reasoning: str
+    tool_appropriateness_reasoning: str
+    parameter_accuracy_reasoning: str
+    dependency_awareness_reasoning: str
+    parallelism_efficiency_reasoning: str
+    task_fulfillment: float
+    grounding: float
+    tool_appropriateness: float
+    parameter_accuracy: float
+    dependency_awareness: float
+    parallelism_and_efficiency: float
+
+
 class LLMProvider(Protocol):
     """Protocol for LLM providers used in evaluation"""
     async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
         ...
-    
+
+    async def get_completion_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        response_model: Type[PydanticBaseModel],
+    ) -> PydanticBaseModel:
+        ...
+
     def clean_and_parse_json(self, raw_json: str) -> Any:
         ...
 class BaseEvaluator(ABC):
@@ -350,11 +376,14 @@ class LLMJudge:
             "dependency_awareness", "parallelism_and_efficiency"
         ]
         
-        # Define analysis text fields to preserve from first evaluation
+        # Define reasoning text fields to preserve from first evaluation
         analysis_fields = [
-            "task_completion_analysis",
-            "tool_selection_analysis",
-            "planning_effectiveness_and_efficiency_analysis"
+            "task_fulfillment_reasoning",
+            "grounding_reasoning",
+            "tool_appropriateness_reasoning",
+            "parameter_accuracy_reasoning",
+            "dependency_awareness_reasoning",
+            "parallelism_efficiency_reasoning",
         ]
         
         # Calculate averages for each score field
@@ -589,17 +618,18 @@ class LLMJudge:
                 
                 try:
                     llm_start_time = time.time()
-                    response = await self.llm.get_completion(
-                        "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.", 
-                        randomized_prompt, 
-                        config_loader.get_evaluation_max_tokens()
+                    parsed_eval = await self.llm.get_completion_structured(
+                        "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.",
+                        randomized_prompt,
+                        config_loader.get_evaluation_max_tokens(),
+                        JudgeEvaluation,
                     )
                     llm_end_time = time.time()
-                    
+
                     parse_start_time = time.time()
-                    parsed_scores = self.llm.clean_and_parse_json(response)
+                    parsed_scores = parsed_eval.model_dump()
                     parse_end_time = time.time()
-                    
+
                     all_scores.append(parsed_scores)
                     
                     eval_total_time = time.time() - eval_start_time
@@ -855,19 +885,17 @@ class LLMJudge:
         try:
             single_eval_start_time = time.time()
             logger.debug(f"Starting single LLM judge evaluation for task: {task[:100]}...")
-            
+
             llm_start_time = time.time()
-            response = await self.llm.get_completion(
-                "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.", 
-                prompt, 
-                15000
+            result = await self.llm.get_completion_structured(
+                "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.",
+                prompt,
+                15000,
+                JudgeEvaluation,
             )
             llm_end_time = time.time()
-            
-            logger.debug(f"LLM response received: {response[:200]}...")
-            
+
             parse_start_time = time.time()
-            result = self.llm.clean_and_parse_json(response)
             parse_end_time = time.time()
             
             single_eval_total_time = time.time() - single_eval_start_time
@@ -879,46 +907,35 @@ class LLMJudge:
             logger.info(f"   LLM call time: {llm_time:.2f}s")
             logger.info(f"   Parsing time: {parse_time:.3f}s")
             logger.debug(f"Parsed result: {result}")
-            
-            # Extract 6 subdimension scores
-            task_fulfillment = result.get('task_fulfillment')
-            grounding = result.get('grounding')
-            
-            tool_appropriateness = result.get('tool_appropriateness')
-            parameter_accuracy = result.get('parameter_accuracy')
-            
-            dependency_awareness = result.get('dependency_awareness')
-            parallelism_and_efficiency = result.get('parallelism_and_efficiency')
-            
+
             # Calculate aggregate scores (2 scores per category)
-            task_completion_scores = [task_fulfillment, grounding]
-            tool_selection_scores = [tool_appropriateness, parameter_accuracy]
-            planning_scores = [dependency_awareness, parallelism_and_efficiency]
-            
-            task_completion_score = sum(task_completion_scores) / len(task_completion_scores) if task_completion_scores else 0
-            tool_selection_score = sum(tool_selection_scores) / len(tool_selection_scores) if tool_selection_scores else 0
-            planning_effectiveness_and_efficiency_score = sum(planning_scores) / len(planning_scores) if planning_scores else 0
-            
-            # Note: Removed flat_average_score calculation as it's no longer needed
-            
+            task_completion_score = (result.task_fulfillment + result.grounding) / 2
+            tool_selection_score = (result.tool_appropriateness + result.parameter_accuracy) / 2
+            planning_effectiveness_and_efficiency_score = (
+                result.dependency_awareness + result.parallelism_and_efficiency
+            ) / 2
+
             return {
                 # 6 subdimension scores
-                'task_fulfillment': task_fulfillment,
-                'grounding': grounding,
-                'tool_appropriateness': tool_appropriateness,
-                'parameter_accuracy': parameter_accuracy,
-                'dependency_awareness': dependency_awareness,
-                'parallelism_and_efficiency': parallelism_and_efficiency,
-                
+                'task_fulfillment': result.task_fulfillment,
+                'grounding': result.grounding,
+                'tool_appropriateness': result.tool_appropriateness,
+                'parameter_accuracy': result.parameter_accuracy,
+                'dependency_awareness': result.dependency_awareness,
+                'parallelism_and_efficiency': result.parallelism_and_efficiency,
+
                 # 3 calculated aggregate scores
                 'task_completion_score': task_completion_score,
                 'tool_selection_score': tool_selection_score,
                 'planning_effectiveness_and_efficiency_score': planning_effectiveness_and_efficiency_score,
-                
-                # Analysis text fields
-                'task_completion_analysis': result.get('task_completion_analysis', ''),
-                'tool_selection_analysis': result.get('tool_selection_analysis', ''),
-                'planning_effectiveness_and_efficiency_analysis': result.get('planning_effectiveness_and_efficiency_analysis', '')
+
+                # Reasoning text fields (from model output)
+                'task_fulfillment_reasoning': result.task_fulfillment_reasoning,
+                'grounding_reasoning': result.grounding_reasoning,
+                'tool_appropriateness_reasoning': result.tool_appropriateness_reasoning,
+                'parameter_accuracy_reasoning': result.parameter_accuracy_reasoning,
+                'dependency_awareness_reasoning': result.dependency_awareness_reasoning,
+                'parallelism_efficiency_reasoning': result.parallelism_efficiency_reasoning,
             }
             
         except Exception as e:

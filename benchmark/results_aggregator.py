@@ -265,12 +265,22 @@ class ResultsAggregator:
                     tool_calls_counts.append(len(execution_results))
             
             # Collect token usage
-            if 'total_output_tokens' in result:
-                total_output_tokens_list.append(result['total_output_tokens'])
-            if 'total_prompt_tokens' in result:
-                total_prompt_tokens_list.append(result['total_prompt_tokens'])
-            if 'total_tokens' in result:
-                total_tokens_list.append(result['total_tokens'])
+            token_usage = result.get('token_usage', {})
+            if isinstance(token_usage, dict) and token_usage:
+                if 'completion_tokens' in token_usage:
+                    total_output_tokens_list.append(token_usage.get('completion_tokens', 0))
+                if 'prompt_tokens' in token_usage:
+                    total_prompt_tokens_list.append(token_usage.get('prompt_tokens', 0))
+                if 'total_tokens' in token_usage:
+                    total_tokens_list.append(token_usage.get('total_tokens', 0))
+            else:
+                # Backward compatibility with legacy per-task fields
+                if 'total_output_tokens' in result:
+                    total_output_tokens_list.append(result['total_output_tokens'])
+                if 'total_prompt_tokens' in result:
+                    total_prompt_tokens_list.append(result['total_prompt_tokens'])
+                if 'total_tokens' in result:
+                    total_tokens_list.append(result['total_tokens'])
         
         return {
             # 4 aggregate scores
