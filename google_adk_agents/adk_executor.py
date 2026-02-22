@@ -16,11 +16,13 @@ from google.adk.runners import InMemoryRunner
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.session import Session
 from google.genai import types
+from langfuse import get_client
 
 from .config import Config
 from .coordinator import create_coordinator_agent, MultiAgentOrchestrator
 
 logger = logging.getLogger(__name__)
+langfuse = get_client()
 
 
 class ADKTaskExecutor:
@@ -48,7 +50,6 @@ class ADKTaskExecutor:
         server_configs: List[Dict[str, Any]],
         config: Optional[Config] = None,
         model_override: Optional[str] = None,
-        concurrent_summarization: bool = False,  # For interface compatibility
     ):
         """Initialize the ADK task executor.
         
@@ -56,12 +57,10 @@ class ADKTaskExecutor:
             server_configs: List of server configuration dictionaries
             config: Optional Config instance for model configuration
             model_override: Optional model name to override default
-            concurrent_summarization: Ignored, kept for interface compatibility
         """
         self.server_configs = server_configs
         self.config = config or Config()
         self.model_override = model_override
-        self.concurrent_summarization = concurrent_summarization
         
         # These will be initialized in setup
         self.coordinator = None
@@ -77,12 +76,72 @@ class ADKTaskExecutor:
         self.total_output_tokens = 0
         self.total_prompt_tokens = 0
         self.total_tokens = 0
+
+        # Map ADK tool name prefixes (derived from server names) to canonical server names
+        self._server_prefix_map = self._build_server_prefix_map(server_configs)
         
         # Planning compliance tracking
         self._total_planned_tools = 0
         self._valid_planned_tools = 0
         
         logger.info("ADKTaskExecutor initialized")
+
+    @staticmethod
+    def _normalize_server_name(server_name: str) -> str:
+        """Normalize server name using same strategy as tool prefix generation."""
+        return server_name.replace(" ", "_").replace("-", "_").lower()
+
+    def _build_server_prefix_map(self, server_configs: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Build mapping from ADK tool name prefix to original server name."""
+        prefix_map: Dict[str, str] = {}
+        for config in server_configs:
+            server_name = config.get("name", "")
+            if not server_name:
+                continue
+            safe_name = self._normalize_server_name(server_name)
+            prefix_map[f"{safe_name}_"] = server_name
+        return prefix_map
+
+    def _extract_server_and_base_tool(self, tool_name: str) -> tuple[str, str]:
+        """Extract server and base tool name from ADK tool identifier."""
+        if not tool_name:
+            return "", ""
+
+        # Legacy format support: server:tool
+        if ":" in tool_name:
+            server, base_tool = tool_name.split(":", 1)
+            return server, base_tool
+
+        # ADK prefixed format support: <normalized_server>_<tool_name>
+        for prefix in sorted(self._server_prefix_map.keys(), key=len, reverse=True):
+            if tool_name.startswith(prefix):
+                return self._server_prefix_map[prefix], tool_name[len(prefix):]
+
+        return "", tool_name
+
+    def _build_observed_tools_map(self) -> Dict[str, Any]:
+        """Build tool registry from observed execution results.
+
+        This guarantees evaluator compatibility even when ADK tool metadata
+        introspection is incomplete.
+        """
+        observed_tools: Dict[str, Any] = {}
+        for result in self.execution_results:
+            tool_name = result.get("tool", "")
+            if not tool_name:
+                continue
+
+            server_name, base_tool_name = self._extract_server_and_base_tool(tool_name)
+            if tool_name not in observed_tools:
+                observed_tools[tool_name] = {
+                    "name": base_tool_name,
+                    "original_name": base_tool_name,
+                    "server": server_name,
+                    "description": "",
+                    "input_schema": {}
+                }
+
+        return observed_tools
     
     async def setup(self, server_names: Optional[List[str]] = None) -> None:
         """Set up the multi-agent hierarchy.
@@ -157,6 +216,12 @@ class ADKTaskExecutor:
             app_name=self.APP_NAME,
             user_id=self.USER_ID,
         )
+
+        langfuse_trace_id = None
+        try:
+            langfuse_trace_id = langfuse.get_current_trace_id()
+        except Exception:
+            langfuse_trace_id = None
         
         logger.info(f"Created session: {session.id}")
         
@@ -218,9 +283,20 @@ class ADKTaskExecutor:
         
         elapsed_time = time.time() - start_time
         logger.info(f"ADK execution completed in {elapsed_time:.2f}s with {round_count} events")
+
+        if not langfuse_trace_id:
+            try:
+                langfuse_trace_id = langfuse.get_current_trace_id()
+            except Exception:
+                langfuse_trace_id = None
         
         # Calculate planning compliance (ADK handles this internally, so always 1.0)
         planning_json_compliance = 1.0
+
+        # Build available tools map with robust fallback from observed tool usage
+        available_tools = self.get_available_tools()
+        observed_tools = self._build_observed_tools_map()
+        available_tools.update(observed_tools)
         
         return {
             "solution": final_response,
@@ -229,9 +305,17 @@ class ADKTaskExecutor:
             "planning_json_compliance": planning_json_compliance,
             "accumulated_information": self.accumulated_information,
             "accumulated_information_uncompressed": self.accumulated_information_uncompressed,
+            "available_tools": available_tools,
             "total_output_tokens": self.total_output_tokens,
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_tokens": self.total_tokens,
+            "adk_session_id": session.id,
+            "langfuse_trace_id": langfuse_trace_id,
+            "task_run_metadata": {
+                "adk_session_id": session.id,
+                "langfuse_trace_id": langfuse_trace_id,
+                "runner": "adk"
+            },
         }
     
     def _process_event(self, event) -> None:
@@ -262,12 +346,15 @@ class ADKTaskExecutor:
         """
         tool_name = getattr(function_call, 'name', 'unknown')
         args = getattr(function_call, 'args', {})
+        server_name, _ = self._extract_server_and_base_tool(tool_name)
         
         self.execution_results.append({
             "type": "tool_call",
             "tool": tool_name,
+            "server": server_name,
             "parameters": args,
             "timestamp": time.time(),
+            "success": False  # Will be updated when response is received
         })
         
         logger.info(f"Tool call: {tool_name}")
@@ -280,23 +367,91 @@ class ADKTaskExecutor:
         """
         tool_name = getattr(function_response, 'name', 'unknown')
         response = getattr(function_response, 'response', {})
+        server_name, _ = self._extract_server_and_base_tool(tool_name)
+        
+        # Determine if the response indicates success or failure
+        # Check for error indicators in the response
+        is_success = True
+        if isinstance(response, dict):
+            # Check for common error indicators
+            if response.get('isError') or response.get('error'):
+                is_success = False
+            # Check if response indicates exception
+            if 'exception' in str(response).lower():
+                is_success = False
         
         # Append response to the last tool call if it matches
         for result in reversed(self.execution_results):
             if result.get("type") == "tool_call" and result.get("tool") == tool_name:
                 result["response"] = response
+                result["result"] = str(response) if not isinstance(response, str) else response
                 result["type"] = "tool_execution"
+                result["success"] = is_success
+                if not is_success:
+                    result["error"] = str(response)
                 break
         else:
             # No matching call found, add as separate result
             self.execution_results.append({
                 "type": "tool_response",
                 "tool": tool_name,
+                "server": server_name,
                 "response": response,
+                "result": str(response) if not isinstance(response, str) else response,
                 "timestamp": time.time(),
+                "success": is_success
             })
         
-        logger.debug(f"Tool response: {tool_name}")
+        logger.debug(f"Tool response: {tool_name} (success={is_success})")
+    
+    def get_available_tools(self) -> Dict[str, Any]:
+        """Get all available tools from all specialist agents.
+        
+        Returns:
+            Dictionary mapping tool names to tool information
+        """
+        if not self.orchestrator or not self.coordinator:
+            logger.warning("Cannot get available tools: orchestrator not initialized")
+            return {}
+        
+        available_tools = {}
+        
+        # Iterate through all specialist agents
+        if self.coordinator.sub_agents:
+            for agent in self.coordinator.sub_agents:
+                agent_name = agent.name
+                if agent.tools:
+                    for tool in agent.tools:
+                        # Skip toolset wrappers that don't expose a concrete tool name
+                        if not hasattr(tool, 'name'):
+                            continue
+
+                        # Get tool name and create a unique key
+                        tool_name = getattr(tool, 'name', 'unknown')
+                        if not tool_name or tool_name == 'unknown':
+                            continue
+
+                        # Try to extract server name from tool name (format: server:tool)
+                        server_name, base_tool_name = self._extract_server_and_base_tool(tool_name)
+                        if not server_name:
+                            server_name = agent_name
+                        
+                        tool_key = tool_name  # Use full name as key
+                        
+                        # Get tool description and schema
+                        description = getattr(tool, 'description', '')
+                        input_schema = getattr(tool, 'input_schema', {})
+                        
+                        available_tools[tool_key] = {
+                            "name": base_tool_name,
+                            "original_name": base_tool_name,
+                            "server": server_name,
+                            "description": description,
+                            "input_schema": input_schema
+                        }
+        
+        logger.debug(f"Collected {len(available_tools)} tools from specialist agents")
+        return available_tools
     
     def _serialize_state(self, state) -> str:
         """Serialize session state to string format.

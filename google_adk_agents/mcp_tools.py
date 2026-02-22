@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 def create_toolset_for_server(
     server_config: Dict[str, Any],
-    tool_filter: Optional[List[str]] = None
+    tool_filter: Optional[List[str]] = None,
+    add_server_prefix: bool = True
 ) -> McpToolset:
     """Create a McpToolset for a single MCP server.
     
@@ -34,12 +35,19 @@ def create_toolset_for_server(
             - 'port': Port number (for http)
             - 'endpoint': Endpoint path (for http, default '/mcp')
         tool_filter: Optional list of specific tool names to include
+        add_server_prefix: Whether to add server name prefix to tool names to ensure uniqueness
         
     Returns:
         McpToolset instance configured for the server
     """
     server_name = server_config["name"]
     transport_type = server_config.get("transport", "stdio")
+    
+    # Create a safe prefix from server name (replace spaces and special chars with underscores)
+    tool_prefix = None
+    if add_server_prefix:
+        safe_name = server_name.replace(" ", "_").replace("-", "_").lower()
+        tool_prefix = f"{safe_name}_"
     
     if transport_type == "http":
         # Use SSE connection for HTTP-based MCP servers
@@ -95,16 +103,19 @@ def create_toolset_for_server(
     toolset = McpToolset(
         connection_params=connection_params,
         tool_filter=tool_filter,
+        tool_name_prefix=tool_prefix,
     )
     
-    logger.info(f"Created McpToolset for server '{server_name}' using {transport_type} transport")
+    prefix_msg = f" with prefix '{tool_prefix}'" if tool_prefix else ""
+    logger.info(f"Created McpToolset for server '{server_name}' using {transport_type} transport{prefix_msg}")
     return toolset
 
 
 def create_toolsets_for_servers(
     server_configs: List[Dict[str, Any]],
     server_names: Optional[List[str]] = None,
-    tool_filter: Optional[Dict[str, List[str]]] = None
+    tool_filter: Optional[Dict[str, List[str]]] = None,
+    add_server_prefix: bool = True
 ) -> List[McpToolset]:
     """Create McpToolset instances for multiple MCP servers.
     
@@ -112,6 +123,7 @@ def create_toolsets_for_servers(
         server_configs: List of server configuration dicts
         server_names: Optional list of server names to include (default: all)
         tool_filter: Optional dict mapping server names to lists of tool names
+        add_server_prefix: Whether to add server name prefix to tool names to ensure uniqueness
         
     Returns:
         List of McpToolset instances
@@ -136,7 +148,7 @@ def create_toolsets_for_servers(
             server_tool_filter = tool_filter[server_name]
         
         try:
-            toolset = create_toolset_for_server(server_config, server_tool_filter)
+            toolset = create_toolset_for_server(server_config, server_tool_filter, add_server_prefix)
             toolsets.append(toolset)
         except Exception as e:
             logger.error(f"Failed to create toolset for server '{server_name}': {e}")
@@ -156,7 +168,8 @@ def get_server_config(server_configs: List[Dict[str, Any]], server_name: str) ->
 def create_mcp_tools_for_agent(
     server_configs: List[Dict[str, Any]],
     server_names: List[str],
-    tool_filter: Optional[Dict[str, List[str]]] = None
+    tool_filter: Optional[Dict[str, List[str]]] = None,
+    add_server_prefix: bool = True
 ) -> List[McpToolset]:
     """Create McpToolset instances for an agent's assigned servers.
     
@@ -166,6 +179,7 @@ def create_mcp_tools_for_agent(
         server_configs: List of server configuration dictionaries
         server_names: List of MCP server names assigned to the agent
         tool_filter: Optional dict mapping server names to lists of tool names
+        add_server_prefix: Whether to add server name prefix to tool names to ensure uniqueness
         
     Returns:
         List of McpToolset instances
@@ -174,7 +188,8 @@ def create_mcp_tools_for_agent(
         >>> toolsets = create_mcp_tools_for_agent(
         ...     server_configs, 
         ...     ["weather_mcp", "time-mcp"],
-        ...     tool_filter={"time-mcp": ["get_current_time"]}
+        ...     tool_filter={"time-mcp": ["get_current_time"]},
+        ...     add_server_prefix=True
         ... )
         >>> agent = Agent(name="MyAgent", tools=toolsets)
     """
@@ -187,4 +202,4 @@ def create_mcp_tools_for_agent(
         else:
             logger.warning(f"Server '{server_name}' not found in server_configs")
     
-    return create_toolsets_for_servers(relevant_configs, tool_filter=tool_filter)
+    return create_toolsets_for_servers(relevant_configs, tool_filter=tool_filter, add_server_prefix=add_server_prefix)
