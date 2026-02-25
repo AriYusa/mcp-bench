@@ -94,7 +94,7 @@ When answering questions:
             "Context7",            # Project documentation
             "NixOS",               # System config (mcp-nixos)
             "OpenAPI Explorer",    # API testing (openapi-mcp-server)
-        ]
+        ],
     ),
     
     "market_analyst": AgentConfig(
