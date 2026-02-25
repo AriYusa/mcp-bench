@@ -20,7 +20,7 @@ import time
 import traceback
 from datetime import datetime
 from typing import Dict, List, Any, Optional
-from langfuse import get_client, observe
+from langfuse import get_client
 
 # Add parent directory to Python path to resolve imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from google_adk_agents.adk_executor import ADKTaskExecutor
 from benchmark.evaluator import TaskEvaluator
 from benchmark.results_aggregator import ResultsAggregator
-from benchmark.results_formatter import ResultsFormatter
 from utils.local_server_config import LocalServerConfigLoader
 import config.config_loader as config_loader
 from llm.provider import LLMProvider
@@ -64,7 +63,6 @@ class ADKBenchmarkRunner:
         concurrent_summarization: Whether to summarize results concurrently
         use_fuzzy_descriptions: Whether to use fuzzy task descriptions
         aggregator: Results aggregator instance
-        formatter: Results formatter instance
     """
     
     def __init__(
@@ -79,7 +77,6 @@ class ADKBenchmarkRunner:
         # Dependency injection parameters
         local_config_loader: Optional[LocalServerConfigLoader] = None,
         aggregator: Optional[ResultsAggregator] = None,
-        formatter: Optional[ResultsFormatter] = None,
         judge_provider: Optional[Any] = None
     ) -> None:
         """Initialize ADK benchmark runner.
@@ -94,7 +91,6 @@ class ADKBenchmarkRunner:
             use_fuzzy_descriptions: Use fuzzy task descriptions
             local_config_loader: Injected config loader
             aggregator: Injected results aggregator
-            formatter: Injected results formatter
             judge_provider: Injected judge LLM provider
         """
         # Use config file defaults if not explicitly provided
@@ -119,7 +115,6 @@ class ADKBenchmarkRunner:
         
         # Initialize results handling components (use injected or create defaults)
         self.aggregator = aggregator or ResultsAggregator()
-        self.formatter = formatter or ResultsFormatter()
         
         # ADK-specific: List of available model names (ADK handles model configs internally)
         self.model_configs = {
@@ -153,19 +148,22 @@ class ADKBenchmarkRunner:
                 flattened_tasks = []
                 for server_group in data['server_tasks']:
                     server_name = server_group.get('server_name', '')
+                    required_servers = server_group.get('servers', [])
                     # Handle both 'task' (single) and 'tasks' (array) formats
                     if 'task' in server_group:
                         # Single task format
                         flattened_tasks.append({
                             'server_name': server_name,
-                            'task': server_group['task']
+                            'task': server_group['task'],
+                            'required_servers': required_servers
                         })
                     elif 'tasks' in server_group:
                         # Multiple tasks format
                         for task in server_group.get('tasks', []):
                             flattened_tasks.append({
                                 'server_name': server_name,
-                                'task': task
+                                'task': task,
+                                'required_servers': required_servers
                             })
                 tasks = flattened_tasks
             elif 'tasks' in data:
@@ -375,6 +373,7 @@ class ADKBenchmarkRunner:
         execution_result = None
         for attempt in range(max_retries):
             start_time = time.time()
+            executor = None
             
             try:
                 logger.info(f"[ADK] Attempt {attempt + 1}/{max_retries} for task {task_id}")
@@ -384,6 +383,7 @@ class ADKBenchmarkRunner:
                 executor = ADKTaskExecutor(
                     server_configs=all_server_configs,
                     model_override=model_name,  # Pass model name directly
+                    required_servers=task_execution_info.get('required_servers', []),
                 )
                 
                 # Setup ADK multi-agent system
@@ -467,6 +467,14 @@ class ADKBenchmarkRunner:
                             'runner': 'adk'
                         }
                     }
+            
+            finally:
+                # Always cleanup the executor after each attempt
+                if executor is not None:
+                    try:
+                        await executor.cleanup()
+                    except Exception as cleanup_error:
+                        logger.warning(f"Error during executor cleanup: {cleanup_error}")
         
         if execution_result is None:
             raise RuntimeError(f"Task {task_id} execution completed retry loop without returning - this is a bug")
@@ -482,6 +490,7 @@ class ADKBenchmarkRunner:
         task_data = task_info.get('task', task_info)
         task_id = task_data.get('task_id', 'unknown')
         server_name = task_info.get('server_name', task_data.get('server_name', 'unknown'))
+        required_servers = task_info.get('required_servers', [])
         
         # Determine which description to use
         description_type = "fuzzy" if self.use_fuzzy_descriptions else "detailed"
@@ -505,6 +514,7 @@ class ADKBenchmarkRunner:
             'task_data': task_data,
             'description_type': description_type,
             'ref_info': ref_info,
+            'required_servers': required_servers,
         }
     
     async def _prepare_server_configs(self, server_name: str, servers_info: Dict[str, Any], task_data: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -624,7 +634,6 @@ class ADKBenchmarkRunner:
             },
             'task_run_metadata': {
                 'adk_session_id': result_data.get('adk_session_id') or base_result.get('task_run_metadata', {}).get('adk_session_id'),
-                'sdk_session_id': result_data.get('sdk_session_id') or result_data.get('adk_session_id') or base_result.get('task_run_metadata', {}).get('sdk_session_id') or base_result.get('task_run_metadata', {}).get('adk_session_id'),
                 'langfuse_trace_id': result_data.get('langfuse_trace_id') or base_result.get('task_run_metadata', {}).get('langfuse_trace_id'),
                 'runner': 'adk',
             },
@@ -773,15 +782,6 @@ class ADKBenchmarkRunner:
                 
                 # Update cumulative metrics (store current model's results)
                 self.last_cumulative_metrics = aggregated_results.copy()
-                
-                # Display current results for this model
-                self.formatter.format_current_metrics(
-                    model_name, 
-                    completed_tasks, 
-                    len(tasks), 
-                    self.last_cumulative_metrics, 
-                    self.tasks_file
-                )
 
             except Exception as e:
                 logger.error(f"[ADK] Error testing model {model_name}: {e}")

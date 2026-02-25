@@ -6,11 +6,12 @@ including execution compliance analysis, LLM performance assessment, and tool ac
 """
 
 import asyncio
+import json
 import logging
 import random
 import time
-from typing import List, Dict, Any, Optional, Protocol
-from collections import Counter
+from typing import List, Dict, Any, Optional, Protocol, Type
+from collections import Counter, defaultdict
 from abc import ABC, abstractmethod
 import jsonschema
 from jsonschema import ValidationError
@@ -186,7 +187,8 @@ class LLMJudge:
             **EXECUTION SUMMARY**:
             {execution_summary}
 
-            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools):
+            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools)
+            The agent is expected to primarily use tools from this MCP services, but not limited to them:
             {self._format_available_tools(available_tools)}
 
             ---""")
@@ -424,8 +426,8 @@ class LLMJudge:
             description = tool_info.get('description', 'No description available')
             if description is None:
                 description = 'No description available'
-            if len(description) > 500:
-                description = description[:500] + "..."
+            if len(description) > 200:
+                description = description[:200] + "..."
             
             servers[server].append({
                 'name': tool_name,
@@ -439,7 +441,8 @@ class LLMJudge:
             
             # Show ALL tools with descriptions for each server
             for tool in tools:
-                lines.append(f"  - {tool['name']}: {tool['description']}")
+                tool_description = str(tool['description'] or "").strip("`").strip()
+                lines.append(f"  - {tool['name']}: ```{tool_description}```")
             
             lines.append("")  # Empty line between servers
         
@@ -519,6 +522,35 @@ class LLMJudge:
             if len(accumulated_info) > target_chars:
                 return accumulated_info[:target_chars] + "\n[Truncated for token limit]"
             return accumulated_info
+        
+    def _get_accumulated_information_from_execution_results(self, execution_results: List[Dict[str, Any]]) -> str:
+        # Group per round information, and intert into prompt format
+        execution_results_by_round = defaultdict(list)
+        for tool_result in execution_results:
+            round_num = tool_result.get("round", 0)
+            execution_results_by_round[round_num].append(tool_result)
+
+        # Format each round's information
+        formatted_rounds = []
+        for round_num in sorted(execution_results_by_round.keys()):
+            round_info = execution_results_by_round[round_num]
+            formatted_rounds.append(f"--- Summary of Round {round_num} ---")
+            for tool_result in round_info:
+                tool_info_text_parts = []
+                tool_info_text_parts.append(f"Tool `{tool_result.get('tool')}` with parameters {json.dumps(tool_result.get('parameters', {}))}")
+                if tool_result.get('server'):
+                    tool_info_text_parts.append(f"on server {tool_result.get('server')}")
+
+                if isinstance(tool_result.get('response'), dict):
+                    response = tool_result.get('response', {}).get('content')
+                else:
+                    response = tool_result.get('response', 'No response')
+                tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response}")
+
+                formatted_rounds.append(" ".join(tool_info_text_parts))
+            formatted_rounds.append("")  # Empty line between rounds
+        
+        return "\n".join(formatted_rounds).strip()
 
     async def evaluate_task_performance(self, task: str, final_solution: str, 
                                       execution_results: List[Dict[str, Any]], 
@@ -528,7 +560,9 @@ class LLMJudge:
                                       dependency_analysis: str = None) -> Dict[str, Any]:
         """Evaluate task performance using LLM judge with 10-dimension scoring"""
         
-        # Track the accumulated information to use (may be compressed if needed)
+        if not accumulated_information:
+            accumulated_information = self._get_accumulated_information_from_execution_results(execution_results)
+
         accumulated_info_to_use = accumulated_information
         
         # Retry loop for handling token limit errors
@@ -685,8 +719,10 @@ class LLMJudge:
             
             ---
             
-            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools):
+            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools)
+            The agent is expected to primarily use tools from this MCP services, but not limited to them:
             {self._format_available_tools(available_tools)}
+
             {task_section}
             **EXECUTION SUMMARY**:
             {execution_summary}
@@ -991,6 +1027,7 @@ class TaskEvaluator(BaseEvaluator):
             planning_json_compliance: Pre-calculated planning JSON compliance from executor (optional)
             accumulated_information: Additional context from task execution (optional)
             concrete_task_description: Original concrete task description for evaluation reference (optional)
+            dependency_analysis: Task dependency analysis (optional)
             
         Returns:
             Dictionary containing all evaluation metrics

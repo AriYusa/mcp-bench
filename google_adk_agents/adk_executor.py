@@ -7,6 +7,7 @@ sub-agents for domain-specific task handling.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -15,8 +16,14 @@ from typing import Dict, List, Any, Optional
 from google.adk.runners import InMemoryRunner
 from google.adk.agents.run_config import RunConfig
 from google.adk.sessions.session import Session
+from google.adk.plugins.base_plugin import BasePlugin
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.models import LlmResponse
 from google.genai import types
 from langfuse import get_client
+from google.adk.agents.llm_agent import LlmAgent
+from google.adk.tools.mcp_tool.mcp_tool import McpTool
 
 from .config import Config
 from .coordinator import create_coordinator_agent, MultiAgentOrchestrator
@@ -24,6 +31,35 @@ from .coordinator import create_coordinator_agent, MultiAgentOrchestrator
 logger = logging.getLogger(__name__)
 langfuse = get_client()
 
+class LangfuseTracePlugin(BasePlugin):
+    """Plugin to capture Langfuse trace ID during ADK runner execution."""
+    
+    def __init__(self) -> None:
+        super().__init__(name="langfuse_trace")
+        self.trace_id = None
+    
+    async def after_run_callback(
+        self, *, invocation_context: InvocationContext
+    ) -> None:
+        """Captures the Langfuse trace ID before the runner completes.
+        """
+        try:
+            self.trace_id = langfuse.get_current_trace_id()
+            if self.trace_id:
+                logger.debug(f"Captured Langfuse trace ID: {self.trace_id}")
+        except Exception as e:
+            logger.warning(f"Failed to capture Langfuse trace ID: {e}")
+            self.trace_id = None
+
+class CountInvocationPlugin(BasePlugin):
+    def __init__(self) -> None:
+        super().__init__(name="count_invocation")
+        self.llm_request_count: int = 0
+
+    async def after_model_callback(
+        self, *, callback_context: CallbackContext, llm_response: Optional[LlmResponse]
+    ) -> None:
+        self.llm_request_count += 1
 
 class ADKTaskExecutor:
     """Multi-agent task executor using Google ADK.
@@ -50,6 +86,7 @@ class ADKTaskExecutor:
         server_configs: List[Dict[str, Any]],
         config: Optional[Config] = None,
         model_override: Optional[str] = None,
+        required_servers: Optional[List[str]] = None,
     ):
         """Initialize the ADK task executor.
         
@@ -57,15 +94,21 @@ class ADKTaskExecutor:
             server_configs: List of server configuration dictionaries
             config: Optional Config instance for model configuration
             model_override: Optional model name to override default
+            required_servers: Optional list of required server names for task
         """
         self.server_configs = server_configs
         self.config = config or Config()
         self.model_override = model_override
+        self.required_servers = required_servers or []
         
         # These will be initialized in setup
         self.coordinator = None
         self.runner: Optional[InMemoryRunner] = None
         self.orchestrator: Optional[MultiAgentOrchestrator] = None
+        
+        # Langfuse trace plugin
+        self.langfuse_plugin = LangfuseTracePlugin()
+        self.count_invocation_plugin = CountInvocationPlugin()
         
         # Tracking variables (for interface compatibility)
         self.execution_results: List[Dict[str, Any]] = []
@@ -79,6 +122,7 @@ class ADKTaskExecutor:
 
         # Map ADK tool name prefixes (derived from server names) to canonical server names
         self._server_prefix_map = self._build_server_prefix_map(server_configs)
+        self.tools_of_required_servers = {}  # To store tools from required servers for evals
         
         # Planning compliance tracking
         self._total_planned_tools = 0
@@ -107,41 +151,12 @@ class ADKTaskExecutor:
         if not tool_name:
             return "", ""
 
-        # Legacy format support: server:tool
-        if ":" in tool_name:
-            server, base_tool = tool_name.split(":", 1)
-            return server, base_tool
-
         # ADK prefixed format support: <normalized_server>_<tool_name>
         for prefix in sorted(self._server_prefix_map.keys(), key=len, reverse=True):
             if tool_name.startswith(prefix):
                 return self._server_prefix_map[prefix], tool_name[len(prefix):]
 
         return "", tool_name
-
-    def _build_observed_tools_map(self) -> Dict[str, Any]:
-        """Build tool registry from observed execution results.
-
-        This guarantees evaluator compatibility even when ADK tool metadata
-        introspection is incomplete.
-        """
-        observed_tools: Dict[str, Any] = {}
-        for result in self.execution_results:
-            tool_name = result.get("tool", "")
-            if not tool_name:
-                continue
-
-            server_name, base_tool_name = self._extract_server_and_base_tool(tool_name)
-            if tool_name not in observed_tools:
-                observed_tools[tool_name] = {
-                    "name": base_tool_name,
-                    "original_name": base_tool_name,
-                    "server": server_name,
-                    "description": "",
-                    "input_schema": {}
-                }
-
-        return observed_tools
     
     async def setup(self, server_names: Optional[List[str]] = None) -> None:
         """Set up the multi-agent hierarchy.
@@ -162,11 +177,16 @@ class ADKTaskExecutor:
         )
         
         self.coordinator = self.orchestrator.initialize(server_names)
+
+        # Eagerly preload MCP toolsets so MCP connections are established
+        # during initialization instead of first user query execution.
+        await self._preload_mcp_toolsets()
         
-        # Create the ADK runner
+        # Create the ADK runner with Langfuse plugin
         self.runner = InMemoryRunner(
             agent=self.coordinator,
             app_name=self.APP_NAME,
+            plugins=[self.langfuse_plugin, self.count_invocation_plugin],
         )
         
         # Log agent hierarchy info
@@ -174,7 +194,55 @@ class ADKTaskExecutor:
         logger.info(f"Agent hierarchy: {json.dumps(hierarchy_info, indent=2)}")
         
         logger.info("ADK multi-agent system setup complete")
-    
+
+    def iter_agents(self, agent):
+        """Yields all agents in the tree (depth-first)."""
+        yield agent
+        for sub in agent.sub_agents:
+            yield from self.iter_agents(sub)
+
+    def _collect_agent_hierarchy(self) -> List[LlmAgent]:
+
+        """Collect coordinator and all nested sub-agents.
+
+        Returns:
+            List of unique agents in the hierarchy.
+        """
+        collected_agents = []
+
+        # Iterate all agents and inspect their tools
+        for agent in self.iter_agents(self.coordinator):
+            if isinstance(agent, LlmAgent):
+                collected_agents.append(agent)
+        return collected_agents
+
+    async def _preload_mcp_toolsets(self) -> None:
+        """Eagerly preload MCP toolsets for all agents and sub-agents. So that agent dosnt spent time comnntcting to mcps during execution.
+        
+        Also save info about tools from requreied servers for evals."""
+        agents: List[LlmAgent] = self._collect_agent_hierarchy()
+        if not agents:
+            logger.warning("Skipping MCP preload: no agents available")
+            return
+
+        tools_of_required_servers = {}
+        for agent in agents:
+            agent_name = agent.name
+            tools = await agent.canonical_tools()
+            for tool in tools:
+                if isinstance(tool, McpTool): 
+                    server_name, base_tool_name = self._extract_server_and_base_tool(tool.name)
+                    if server_name in self.required_servers:                
+                        tools_of_required_servers[tool.name] = {
+                            "name": tool.name,
+                            "original_name": base_tool_name,
+                            "server": server_name,
+                            "description": tool.description,
+                            "input_schema": tool.raw_mcp_tool.inputSchema,
+                            "agent": agent_name,
+                        }
+        self.tools_of_required_servers = tools_of_required_servers
+        
     async def execute(self, task: str) -> Dict[str, Any]:
         """Execute a task using the multi-agent system.
         
@@ -216,18 +284,11 @@ class ADKTaskExecutor:
             app_name=self.APP_NAME,
             user_id=self.USER_ID,
         )
-
-        langfuse_trace_id = None
-        try:
-            langfuse_trace_id = langfuse.get_current_trace_id()
-        except Exception:
-            langfuse_trace_id = None
         
         logger.info(f"Created session: {session.id}")
         
         # Execute the task via the coordinator
         final_response = ""
-        round_count = 0
         events_collected = []
         
         try:
@@ -245,7 +306,6 @@ class ADKTaskExecutor:
                 run_config=RunConfig(),
             ):
                 events_collected.append(event)
-                round_count += 1
                 
                 # Process event for tracking
                 self._process_event(event)
@@ -259,7 +319,7 @@ class ADKTaskExecutor:
                         
                         # Track tool calls
                         if hasattr(part, 'function_call') and part.function_call:
-                            self._track_tool_call(part.function_call)
+                            self._track_tool_call(part.function_call, round_count=self.count_invocation_plugin.llm_request_count) 
                         
                         if hasattr(part, 'function_response') and part.function_response:
                             self._track_tool_response(part.function_response)
@@ -282,30 +342,22 @@ class ADKTaskExecutor:
             final_response = f"Error during execution: {str(e)}"
         
         elapsed_time = time.time() - start_time
-        logger.info(f"ADK execution completed in {elapsed_time:.2f}s with {round_count} events")
+        logger.info(f"ADK execution completed in {elapsed_time:.2f}s with {self.count_invocation_plugin.llm_request_count} events")
 
-        if not langfuse_trace_id:
-            try:
-                langfuse_trace_id = langfuse.get_current_trace_id()
-            except Exception:
-                langfuse_trace_id = None
+        # Get trace ID from plugin (captured during execution)
+        langfuse_trace_id = self.langfuse_plugin.trace_id
         
         # Calculate planning compliance (ADK handles this internally, so always 1.0)
         planning_json_compliance = 1.0
-
-        # Build available tools map with robust fallback from observed tool usage
-        available_tools = self.get_available_tools()
-        observed_tools = self._build_observed_tools_map()
-        available_tools.update(observed_tools)
         
         return {
             "solution": final_response,
-            "total_rounds": len(self.execution_results),
+            "total_rounds": self.count_invocation_plugin.llm_request_count,
             "execution_results": self.execution_results,
             "planning_json_compliance": planning_json_compliance,
             "accumulated_information": self.accumulated_information,
             "accumulated_information_uncompressed": self.accumulated_information_uncompressed,
-            "available_tools": available_tools,
+            "available_tools": self.tools_of_required_servers,
             "total_output_tokens": self.total_output_tokens,
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_tokens": self.total_tokens,
@@ -338,11 +390,12 @@ class ADKTaskExecutor:
         author = getattr(event, 'author', 'unknown')
         logger.debug(f"Event from {author}")
     
-    def _track_tool_call(self, function_call) -> None:
+    def _track_tool_call(self, function_call, round_count) -> None:
         """Track a tool call for execution results.
         
         Args:
             function_call: ADK FunctionCall object
+            round_count: Current round number
         """
         tool_name = getattr(function_call, 'name', 'unknown')
         args = getattr(function_call, 'args', {})
@@ -352,11 +405,12 @@ class ADKTaskExecutor:
             "type": "tool_call",
             "tool": tool_name,
             "server": server_name,
+            "round": round_count,
             "parameters": args,
             "timestamp": time.time(),
             "success": False  # Will be updated when response is received
         })
-        
+            
         logger.info(f"Tool call: {tool_name}")
     
     def _track_tool_response(self, function_response) -> None:
@@ -367,7 +421,6 @@ class ADKTaskExecutor:
         """
         tool_name = getattr(function_response, 'name', 'unknown')
         response = getattr(function_response, 'response', {})
-        server_name, _ = self._extract_server_and_base_tool(tool_name)
         
         # Determine if the response indicates success or failure
         # Check for error indicators in the response
@@ -384,74 +437,15 @@ class ADKTaskExecutor:
         for result in reversed(self.execution_results):
             if result.get("type") == "tool_call" and result.get("tool") == tool_name:
                 result["response"] = response
-                result["result"] = str(response) if not isinstance(response, str) else response
                 result["type"] = "tool_execution"
                 result["success"] = is_success
                 if not is_success:
                     result["error"] = str(response)
                 break
         else:
-            # No matching call found, add as separate result
-            self.execution_results.append({
-                "type": "tool_response",
-                "tool": tool_name,
-                "server": server_name,
-                "response": response,
-                "result": str(response) if not isinstance(response, str) else response,
-                "timestamp": time.time(),
-                "success": is_success
-            })
+            raise ValueError(f"No matching tool call found for response: {tool_name}")
         
         logger.debug(f"Tool response: {tool_name} (success={is_success})")
-    
-    def get_available_tools(self) -> Dict[str, Any]:
-        """Get all available tools from all specialist agents.
-        
-        Returns:
-            Dictionary mapping tool names to tool information
-        """
-        if not self.orchestrator or not self.coordinator:
-            logger.warning("Cannot get available tools: orchestrator not initialized")
-            return {}
-        
-        available_tools = {}
-        
-        # Iterate through all specialist agents
-        if self.coordinator.sub_agents:
-            for agent in self.coordinator.sub_agents:
-                agent_name = agent.name
-                if agent.tools:
-                    for tool in agent.tools:
-                        # Skip toolset wrappers that don't expose a concrete tool name
-                        if not hasattr(tool, 'name'):
-                            continue
-
-                        # Get tool name and create a unique key
-                        tool_name = getattr(tool, 'name', 'unknown')
-                        if not tool_name or tool_name == 'unknown':
-                            continue
-
-                        # Try to extract server name from tool name (format: server:tool)
-                        server_name, base_tool_name = self._extract_server_and_base_tool(tool_name)
-                        if not server_name:
-                            server_name = agent_name
-                        
-                        tool_key = tool_name  # Use full name as key
-                        
-                        # Get tool description and schema
-                        description = getattr(tool, 'description', '')
-                        input_schema = getattr(tool, 'input_schema', {})
-                        
-                        available_tools[tool_key] = {
-                            "name": base_tool_name,
-                            "original_name": base_tool_name,
-                            "server": server_name,
-                            "description": description,
-                            "input_schema": input_schema
-                        }
-        
-        logger.debug(f"Collected {len(available_tools)} tools from specialist agents")
-        return available_tools
     
     def _serialize_state(self, state) -> str:
         """Serialize session state to string format.
@@ -500,6 +494,47 @@ class ADKTaskExecutor:
                 for s in info.get("specialists", [])
             )
             logger.info(f"Total tools across specialists: {total_tools}")
+    
+    async def cleanup(self) -> None:
+        """Clean up resources including MCP connections and ADK runner.
+        
+        This ensures all MCP server connections are properly closed and
+        background tasks are terminated, allowing the process to exit cleanly.
+        """
+        logger.info("Cleaning up ADK executor resources...")
+        
+        try:
+            # Close MCP toolset connections for all agents
+            agents = self._collect_agent_hierarchy()
+            for agent in agents:
+                agent_name = getattr(agent, "name", "unknown")
+                tools = getattr(agent, "tools", None) or []
+                
+                for tool in tools:
+                    # Check if this is an MCP toolset with a close method
+                    if hasattr(tool, "_session_manager"):
+                        try:
+                            session_mgr = tool._session_manager
+                            if hasattr(session_mgr, "close"):
+                                logger.debug(f"Closing MCP session for agent '{agent_name}'")
+                                await session_mgr.close()
+                            elif hasattr(session_mgr, "cleanup"):
+                                logger.debug(f"Cleaning up MCP session for agent '{agent_name}'")
+                                await session_mgr.cleanup()
+                        except Exception as e:
+                            logger.warning(f"Error closing MCP session for agent '{agent_name}': {e}")
+            
+            # Clear references
+            self.coordinator = None
+            self.runner = None
+            self.orchestrator = None
+            
+            logger.info("ADK executor cleanup complete")
+            
+        except Exception as e:
+            logger.error(f"Error during ADK executor cleanup: {e}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
 
 
 async def create_adk_executor(
