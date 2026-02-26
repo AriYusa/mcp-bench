@@ -735,6 +735,10 @@ class ADKBenchmarkRunner:
         all_model_task_results: Dict[str, List[Dict[str, Any]]] = {}
         all_model_metrics: Dict[str, Dict[str, Any]] = {}
         
+        # Generate incremental results filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        incremental_file = f"benchmark_results_{timestamp}_incremental.json"
+        
         # Calculate total tasks across all models for overall progress
         total_tasks_all_models = len(available_models) * len(tasks)
         completed_tasks_all_models = 0
@@ -773,6 +777,17 @@ class ADKBenchmarkRunner:
                     # Log progress
                     success_rate = (completed_tasks / (completed_tasks + failed_tasks)) * 100 if (completed_tasks + failed_tasks) > 0 else 0
                     logger.info(f"[ADK] Progress: {completed_tasks}/{len(tasks)} successful ({success_rate:.1f}% success rate)")
+                    
+                    # Save incremental results after each task
+                    await self._save_incremental_results(
+                        incremental_file, 
+                        model_name, 
+                        model_results, 
+                        tasks, 
+                        available_models,
+                        all_model_task_results,
+                        all_model_metrics
+                    )
                 
                 # Aggregate results for this model
                 logger.info(f"\n[ADK] Aggregating results for model {model_name}...")
@@ -934,3 +949,61 @@ class ADKBenchmarkRunner:
         
         logger.info(f"[ADK] Results saved to {output_file}")
         return output_file
+    
+    async def _save_incremental_results(
+        self, 
+        output_file: str, 
+        current_model: str, 
+        current_model_results: List[Dict[str, Any]],
+        tasks: List[Dict[str, Any]],
+        available_models: Dict[str, Any],
+        all_model_task_results: Dict[str, List[Dict[str, Any]]],
+        all_model_metrics: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Save incremental results after each task to prevent data loss.
+        
+        Args:
+            output_file: Path to incremental results file
+            current_model: Name of the model being tested
+            current_model_results: Results for current model so far
+            tasks: All tasks being tested
+            available_models: All models being tested
+            all_model_task_results: All task results across all models
+            all_model_metrics: Aggregated metrics for completed models
+        """
+        try:
+            # Aggregate current model's results so far
+            current_aggregated = self.aggregator.aggregate_model_results(current_model_results)
+            
+            # Build incremental results payload
+            incremental_data = {
+                'task_file': self.tasks_file,
+                'run_metadata': {
+                    'generated_at': datetime.utcnow().isoformat() + 'Z',
+                    'runner': 'adk',
+                    'status': 'in_progress',
+                    'current_model': current_model,
+                    'models_tested': list(available_models.keys()),
+                    'tasks_per_model': len(tasks),
+                    'completed_tasks_current_model': len(current_model_results),
+                    'total_tasks_current_model': len(tasks),
+                },
+                'current_model_progress': {
+                    current_model: current_aggregated
+                },
+                'completed_models_metrics': all_model_metrics,
+                'current_model_task_results': {
+                    current_model: current_model_results
+                },
+                'all_completed_task_results': all_model_task_results,
+            }
+            
+            # Write to file
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(incremental_data, f, indent=2, default=str)
+            
+            logger.debug(f"[ADK] Incremental results saved to {output_file}")
+            
+        except Exception as e:
+            logger.warning(f"[ADK] Failed to save incremental results: {e}")
+            # Don't fail the benchmark if incremental save fails

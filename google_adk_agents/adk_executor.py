@@ -241,7 +241,20 @@ class ADKTaskExecutor:
                             "input_schema": tool.raw_mcp_tool.inputSchema,
                             "agent": agent_name,
                         }
+        
+        tool_name = "transfer_to_agent" 
+        tools_of_required_servers[tool_name] = {
+            "name": tool_name,
+            "original_name": tool_name,
+            "server": "adk_internal",
+            "description": "Switch control to other agent",
+            "input_schema": {"agent_name": "string"},
+            "agent": agent_name,
+        }
         self.tools_of_required_servers = tools_of_required_servers
+        print("Tools allowed:")
+        for tool_name, tool_info in tools_of_required_servers.items():
+            print(f"- {tool_name} (server: {tool_info['server']}, agent: {tool_info['agent']})")
         
     async def execute(self, task: str) -> Dict[str, Any]:
         """Execute a task using the multi-agent system.
