@@ -13,6 +13,8 @@ from google.adk.tools.mcp_tool import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams, SseConnectionParams
 from mcp import StdioServerParameters
 
+from .resilient_mcp_toolset import ResilientMcpToolset
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,7 +102,7 @@ def create_toolset_for_server(
         logger.info(f"Created STDIO connection params for '{server_name}'")
     
     # Create toolset with appropriate connection params
-    toolset = McpToolset(
+    toolset = ResilientMcpToolset(
         connection_params=connection_params,
         tool_filter=tool_filter,
         tool_name_prefix=tool_prefix,

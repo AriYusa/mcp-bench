@@ -26,7 +26,8 @@ from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
 
 from .config import Config
-from .coordinator import create_coordinator_agent, MultiAgentOrchestrator
+from .content_compression import ContentCompressor
+from .coordinator import MultiAgentOrchestrator
 
 logger = logging.getLogger(__name__)
 langfuse = get_client()
@@ -109,6 +110,11 @@ class ADKTaskExecutor:
         # Langfuse trace plugin
         self.langfuse_plugin = LangfuseTracePlugin()
         self.count_invocation_plugin = CountInvocationPlugin()
+        self.context_compressor_plugin = ContentCompressor(
+            model_name=self.model_override or self.config.agent_settings.model,
+            token_threshold=5_000,
+            max_compression_passes=3,
+        )
         
         # Tracking variables (for interface compatibility)
         self.execution_results: List[Dict[str, Any]] = []
@@ -186,7 +192,7 @@ class ADKTaskExecutor:
         self.runner = InMemoryRunner(
             agent=self.coordinator,
             app_name=self.APP_NAME,
-            plugins=[self.langfuse_plugin, self.count_invocation_plugin],
+            plugins=[self.langfuse_plugin, self.count_invocation_plugin, self.context_compressor_plugin],
         )
         
         # Log agent hierarchy info
