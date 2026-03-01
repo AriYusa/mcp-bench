@@ -542,10 +542,18 @@ class LLMJudge:
                     tool_info_text_parts.append(f"on server {tool_result.get('server')}")
 
                 if isinstance(tool_result.get('response'), dict):
-                    response = tool_result.get('response', {}).get('content')
+                    resp_dict = tool_result.get('response', {})
+                    response = resp_dict.get('output') or resp_dict.get('content') or resp_dict.get('structuredContent') or resp_dict
                 else:
                     response = tool_result.get('response', 'No response')
                 tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response}")
+
+                if tool_result.get('compressed'):
+                    before = tool_result.get('compression_tokens_before', 0)
+                    after = tool_result.get('compression_tokens_after', 0)
+                    tool_info_text_parts.append(
+                        f"[Long result compressed with LLM because, therefore might be diffrernt from MCP server/tool has returned initially to request. Compression {before}→{after} tokens]"
+                    )
 
                 formatted_rounds.append(" ".join(tool_info_text_parts))
             formatted_rounds.append("")  # Empty line between rounds

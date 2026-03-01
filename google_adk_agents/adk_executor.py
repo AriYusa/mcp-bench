@@ -28,9 +28,58 @@ from google.adk.tools.mcp_tool.mcp_tool import McpTool
 from .config import Config
 from .content_compression import ContentCompressor
 from .coordinator import MultiAgentOrchestrator
+from . import adk_config_loader
 
 logger = logging.getLogger(__name__)
 langfuse = get_client()
+
+
+def _mcp_asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Custom asyncio exception handler that downgrades MCP session background errors.
+
+    ADK's SessionContext runs MCP session initialization in a fire-and-forget
+    background task. If the MCP server takes too long to start, the task raises
+    TimeoutError (and a BrokenResourceError during cleanup). Because nobody
+    awaits the task, asyncio logs these as "Task exception was never retrieved"
+    at ERROR level.
+
+    These errors are harmless — the ResilientMcpToolset catches the failure in
+    get_tools() and returns [], and ADK creates fresh sessions on demand during
+    actual execution. This handler downgrades them to WARNING so they don't
+    pollute the error log.
+    """
+    exc = context.get("exception")
+    message = context.get("message", "")
+
+    # Identify MCP session background task errors by their source location
+    is_mcp_task_error = (
+        "Task exception was never retrieved" in message
+        and isinstance(exc, (TimeoutError, ExceptionGroup))
+    )
+    # Also catch BrokenResourceError wrapped in ExceptionGroup
+    if not is_mcp_task_error and isinstance(exc, ExceptionGroup):
+        flat = str(exc)
+        if "BrokenResourceError" in flat or "TimeoutError" in flat:
+            is_mcp_task_error = True
+
+    if is_mcp_task_error:
+        task = context.get("future")
+        coro_name = ""
+        if task is not None:
+            coro = getattr(task, "get_coro", lambda: None)()
+            if coro is not None:
+                coro_name = getattr(coro, "__qualname__", "")
+        # Only suppress if the failing task is an MCP SessionContext task
+        if "SessionContext" in coro_name or not coro_name:
+            logger.warning(
+                "MCP session background task failed (server slow to start or "
+                "connection dropped — this is expected during preload and will "
+                "not affect execution): %s", type(exc).__name__
+            )
+            return
+
+    # Fall through to default handler for everything else
+    loop.default_exception_handler(context)
 
 class LangfuseTracePlugin(BasePlugin):
     """Plugin to capture Langfuse trace ID during ADK runner execution."""
@@ -79,8 +128,8 @@ class ADKTaskExecutor:
     for compatibility with the benchmark evaluation system.
     """
     
-    APP_NAME = "mcp_bench_adk"
-    USER_ID = "benchmark_user"
+    APP_NAME = adk_config_loader.get_app_name()
+    USER_ID = adk_config_loader.get_user_id()
     
     def __init__(
         self,
@@ -110,16 +159,20 @@ class ADKTaskExecutor:
         # Langfuse trace plugin
         self.langfuse_plugin = LangfuseTracePlugin()
         self.count_invocation_plugin = CountInvocationPlugin()
+        _compressor_model = (
+            adk_config_loader.get_compression_compressor_model()
+            or self.model_override
+            or self.config.agent_settings.model
+        )
         self.context_compressor_plugin = ContentCompressor(
-            model_name=self.model_override or self.config.agent_settings.model,
-            token_threshold=5_000,
-            max_compression_passes=3,
+            model_name=_compressor_model,
+            token_threshold=adk_config_loader.get_compression_token_threshold(),
+            tool_result_threshold=adk_config_loader.get_compression_tool_result_threshold(),
+            hard_limit_threshold=adk_config_loader.get_compression_hard_limit_threshold(),
         )
         
         # Tracking variables (for interface compatibility)
         self.execution_results: List[Dict[str, Any]] = []
-        self.accumulated_information = ""
-        self.accumulated_information_uncompressed = ""
         
         # Token usage tracking
         self.total_output_tokens = 0
@@ -174,7 +227,12 @@ class ADKTaskExecutor:
             server_names: Optional list of available server names
         """
         logger.info("Setting up ADK multi-agent system...")
-        
+
+        # Install custom asyncio exception handler to downgrade noisy MCP
+        # session background-task errors from ERROR to WARNING level.
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(_mcp_asyncio_exception_handler)
+
         # Create the orchestrator and initialize agents
         self.orchestrator = MultiAgentOrchestrator(
             server_configs=self.server_configs,
@@ -278,8 +336,6 @@ class ADKTaskExecutor:
                 - total_rounds: Number of agent interactions
                 - execution_results: List of all tool execution results
                 - planning_json_compliance: Always 1.0 for ADK (handled internally)
-                - accumulated_information: Session state as string
-                - accumulated_information_uncompressed: Full session state
                 - total_output_tokens: Total output tokens used
                 - total_prompt_tokens: Total prompt tokens used
                 - total_tokens: Total tokens used
@@ -292,11 +348,13 @@ class ADKTaskExecutor:
         
         # Reset tracking state
         self.execution_results = []
-        self.accumulated_information = ""
-        self.accumulated_information_uncompressed = ""
         self.total_output_tokens = 0
         self.total_prompt_tokens = 0
         self.total_tokens = 0
+        # Reset compressor token counters for this task
+        self.context_compressor_plugin.compression_prompt_tokens = 0
+        self.context_compressor_plugin.compression_output_tokens = 0
+        self.context_compressor_plugin.compression_total_tokens = 0
         
         # Create a new session for this task
         session = await self.runner.session_service.create_session(
@@ -343,17 +401,6 @@ class ADKTaskExecutor:
                         if hasattr(part, 'function_response') and part.function_response:
                             self._track_tool_response(part.function_response)
             
-            # Get final session state for accumulated information
-            updated_session = await self.runner.session_service.get_session(
-                app_name=self.APP_NAME,
-                user_id=self.USER_ID,
-                session_id=session.id,
-            )
-            
-            if updated_session and updated_session.state:
-                self.accumulated_information = self._serialize_state(updated_session.state)
-                self.accumulated_information_uncompressed = self.accumulated_information
-            
         except Exception as e:
             logger.error(f"Error during ADK execution: {e}")
             import traceback
@@ -362,6 +409,18 @@ class ADKTaskExecutor:
         
         elapsed_time = time.time() - start_time
         logger.info(f"ADK execution completed in {elapsed_time:.2f}s with {self.count_invocation_plugin.llm_request_count} events")
+
+        # Add tokens consumed by ContentCompressor LLM calls to the totals
+        compressor_stats = self.context_compressor_plugin.get_stats()
+        self.total_prompt_tokens += compressor_stats["compression_prompt_tokens"]
+        self.total_output_tokens += compressor_stats["compression_output_tokens"]
+        self.total_tokens += compressor_stats["compression_total_tokens"]
+        if compressor_stats["compression_total_tokens"] > 0:
+            logger.info(
+                f"Compression LLM tokens included: prompt={compressor_stats['compression_prompt_tokens']}, "
+                f"output={compressor_stats['compression_output_tokens']}, "
+                f"total={compressor_stats['compression_total_tokens']}"
+            )
 
         # Get trace ID from plugin (captured during execution)
         langfuse_trace_id = self.langfuse_plugin.trace_id
@@ -374,8 +433,6 @@ class ADKTaskExecutor:
             "total_rounds": self.count_invocation_plugin.llm_request_count,
             "execution_results": self.execution_results,
             "planning_json_compliance": planning_json_compliance,
-            "accumulated_information": self.accumulated_information,
-            "accumulated_information_uncompressed": self.accumulated_information_uncompressed,
             "available_tools": self.tools_of_required_servers,
             "total_output_tokens": self.total_output_tokens,
             "total_prompt_tokens": self.total_prompt_tokens,
@@ -446,12 +503,12 @@ class ADKTaskExecutor:
         is_success = True
         if isinstance(response, dict):
             # Check for common error indicators
-            if response.get('isError') or response.get('error'):
-                is_success = False
-            # Check if response indicates exception
-            if 'exception' in str(response).lower():
+            if response.get('isError') or response.get('error') or response.get('exception'):
                 is_success = False
         
+        # Check if Layer 1 compression was applied to this tool's result
+        compression_info = self.context_compressor_plugin.get_and_clear_compression_info(tool_name)
+
         # Append response to the last tool call if it matches
         for result in reversed(self.execution_results):
             if result.get("type") == "tool_call" and result.get("tool") == tool_name:
@@ -460,11 +517,24 @@ class ADKTaskExecutor:
                 result["success"] = is_success
                 if not is_success:
                     result["error"] = str(response)
+                # Annotate with compression details when Layer 1 fired
+                if compression_info:
+                    result["compressed"] = True
+                    result["compression_tokens_before"] = compression_info["tokens_before"]
+                    result["compression_tokens_after"] = compression_info["tokens_after"]
+                    result["compression_tokens_saved"] = (
+                        compression_info["tokens_before"] - compression_info["tokens_after"]
+                    )
+                else:
+                    result["compressed"] = False
                 break
         else:
             raise ValueError(f"No matching tool call found for response: {tool_name}")
-        
-        logger.debug(f"Tool response: {tool_name} (success={is_success})")
+
+        logger.debug(
+            f"Tool response: {tool_name} (success={is_success}"
+            + (f", compressed {compression_info['tokens_before']}→{compression_info['tokens_after']} tokens)" if compression_info else ")")
+        )
     
     def _serialize_state(self, state) -> str:
         """Serialize session state to string format.

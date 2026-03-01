@@ -11,7 +11,7 @@ Classes:
 import asyncio
 import json
 import logging
-from typing import Any, Optional, Tuple, Set, Type
+from typing import Any, Optional, Tuple, Set, Type, Dict
 import json_repair
 import litellm
 from pydantic import BaseModel
