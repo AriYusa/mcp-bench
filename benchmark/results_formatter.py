@@ -45,6 +45,14 @@ def execution_results_to_text(execution_results: List[Dict[str, Any]]) -> str:
         round_num = result.get('round_num', '')
         planned_layer = result.get('planned_layer')
         parameters = result.get('parameters', {})
+
+        # Compression indicator
+        if result.get('compressed'):
+            before = result.get('compression_tokens_before', 0)
+            after = result.get('compression_tokens_after', 0)
+            compression_tag = f" [COMPRESSED {before}→{after} tokens]"
+        else:
+            compression_tag = ""
         
         # Create tool representation with parameters
         # Tool already contains full name (e.g., "@smithery-ai/google-maps:maps_geocode")
@@ -54,9 +62,9 @@ def execution_results_to_text(execution_results: List[Dict[str, Any]]) -> str:
             # Truncate long parameters
             if len(params_str) > 100:
                 params_str = params_str[:97] + "..."
-            tool_repr = f"{success} {tool} {params_str}"
+            tool_repr = f"{success} {tool} {params_str}{compression_tag}"
         else:
-            tool_repr = f"{success} {tool}"
+            tool_repr = f"{success} {tool}{compression_tag}"
         
         if has_planned_layers and planned_layer is not None:
             # Use planned_layer for single-round execution

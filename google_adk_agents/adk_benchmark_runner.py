@@ -29,7 +29,7 @@ from google_adk_agents.adk_executor import ADKTaskExecutor
 from benchmark.evaluator import TaskEvaluator
 from benchmark.results_aggregator import ResultsAggregator
 from utils.local_server_config import LocalServerConfigLoader
-import config.config_loader as config_loader
+import google_adk_agents.adk_config_loader as adk_config_loader
 from llm.provider import LLMProvider
 
 # Configure logging
@@ -94,7 +94,7 @@ class ADKBenchmarkRunner:
             judge_provider: Injected judge LLM provider
         """
         # Use config file defaults if not explicitly provided
-        self.tasks_file = tasks_file or config_loader.get_tasks_file()
+        self.tasks_file = tasks_file or adk_config_loader.get_tasks_file()
         
         # Use injected dependencies or create defaults
         self.local_config_loader = local_config_loader or LocalServerConfigLoader()
@@ -102,27 +102,26 @@ class ADKBenchmarkRunner:
         
         # Use config file defaults for feature flags
         self.enable_distraction_servers = enable_distraction_servers if enable_distraction_servers is not None else True
-        self.distraction_count = distraction_count if distraction_count is not None else config_loader.get_distraction_servers_count()
-        self.enable_judge_stability = enable_judge_stability if enable_judge_stability is not None else config_loader.is_judge_stability_enabled()
-        self.filter_problematic_tools = filter_problematic_tools if filter_problematic_tools is not None else config_loader.is_problematic_tools_filter_enabled()
-        self.concurrent_summarization = concurrent_summarization if concurrent_summarization is not None else config_loader.is_concurrent_summarization_enabled()
-        self.use_fuzzy_descriptions = use_fuzzy_descriptions if use_fuzzy_descriptions is not None else config_loader.use_fuzzy_descriptions()
-        self.enable_concrete_description_ref = config_loader.is_concrete_description_ref_enabled()
+        self.distraction_count = distraction_count if distraction_count is not None else adk_config_loader.get_distraction_servers_count()
+        self.enable_judge_stability = enable_judge_stability if enable_judge_stability is not None else adk_config_loader.is_judge_stability_enabled()
+        self.filter_problematic_tools = filter_problematic_tools if filter_problematic_tools is not None else adk_config_loader.is_problematic_tools_filter_enabled()
+        self.concurrent_summarization = concurrent_summarization if concurrent_summarization is not None else adk_config_loader.is_concurrent_summarization_enabled()
+        self.use_fuzzy_descriptions = use_fuzzy_descriptions if use_fuzzy_descriptions is not None else adk_config_loader.use_fuzzy_descriptions()
+        self.enable_concrete_description_ref = adk_config_loader.is_concrete_description_ref_enabled()
         self.commands_config = None
         
         # Track current cumulative metrics for error handling
         self.last_cumulative_metrics = {}
+
+        # Catalog loaded lazily from mcp_servers_info.json for reliable available_tools
+        self._mcp_servers_catalog: Optional[Dict[str, Any]] = None
+        self._mcp_servers_catalog_path = adk_config_loader.get_servers_catalog_path()
         
         # Initialize results handling components (use injected or create defaults)
         self.aggregator = aggregator or ResultsAggregator()
         
         # ADK-specific: List of available model names (ADK handles model configs internally)
-        self.model_configs = {
-            "gemini-2.0-flash-exp": {"display_name": "Gemini 2.0 Flash Experimental"},
-            "gemini-1.5-pro": {"display_name": "Gemini 1.5 Pro"},
-            "gemini-1.5-flash": {"display_name": "Gemini 1.5 Flash"},
-            "anthropic/claude-sonnet-4-5-20250929": {"display_name": "Claude Sonnet 4.5"},
-        }
+        self.model_configs = adk_config_loader.get_available_models()
         
     async def load_tasks(self) -> List[Dict[str, Any]]:
         """Load benchmark tasks from JSON file.
@@ -250,7 +249,7 @@ class ADKBenchmarkRunner:
             # Add HTTP configuration if this is an HTTP server
             if server_config.get('transport') == 'http':
                 config['transport'] = 'http'
-                config['port'] = server_config.get('port', config_loader.get_default_port())
+                config['port'] = server_config.get('port', adk_config_loader.get_default_port())
                 config['endpoint'] = server_config.get('endpoint', '/mcp')
             
             return config
@@ -281,7 +280,7 @@ class ADKBenchmarkRunner:
         """Select random distraction servers excluding the specified servers."""
         
         if count is None:
-            count = config_loader.get_distraction_servers_count()
+            count = adk_config_loader.get_distraction_servers_count()
         
         if not commands_config:
             return []
@@ -335,13 +334,13 @@ class ADKBenchmarkRunner:
         
         # Set default values from config
         if max_retries is None:
-            max_retries = config_loader.get_max_retries()
+            max_retries = adk_config_loader.get_max_retries()
         if timeout_seconds is None:
-            timeout_seconds = config_loader.get_task_timeout()
+            timeout_seconds = adk_config_loader.get_task_timeout()
         
         # Initialize judge provider once for this task execution
         if not hasattr(self, '_judge_provider') or self._judge_provider is None:
-            self._judge_provider = LLMProvider("anthropic/claude-sonnet-4-5-20250929")
+            self._judge_provider = LLMProvider(adk_config_loader.get_judge_model())
         
         # Step 1: Prepare task execution information
         task_execution_info = await self._prepare_task_execution(task_info)
@@ -428,7 +427,7 @@ class ADKBenchmarkRunner:
                     
                     if attempt < max_retries - 1:
                         logger.info(f"[ADK] Will retry task {task_id}...")
-                        await asyncio.sleep(config_loader.get_retry_delay())
+                        await asyncio.sleep(adk_config_loader.get_retry_delay())
                         continue
                     else:
                         return {
@@ -451,7 +450,7 @@ class ADKBenchmarkRunner:
                 
                 if attempt < max_retries - 1:
                     logger.info(f"[ADK] Will retry task {task_id} due to error...")
-                    await asyncio.sleep(config_loader.get_retry_delay())
+                    await asyncio.sleep(adk_config_loader.get_retry_delay())
                     continue
                 else:
                     return {
@@ -517,6 +516,91 @@ class ADKBenchmarkRunner:
             'required_servers': required_servers,
         }
     
+    def _load_mcp_servers_catalog(self) -> Dict[str, Any]:
+        """Load mcp_servers_info.json catalog (lazy, cached).
+
+        Returns the ``servers`` sub-dict so callers can do
+        ``catalog[server_name]["tools"]`` directly.
+        """
+        if self._mcp_servers_catalog is None:
+            try:
+                with open(self._mcp_servers_catalog_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self._mcp_servers_catalog = data.get('servers', {})
+                logger.info(
+                    f"Loaded MCP servers catalog with {len(self._mcp_servers_catalog)} servers "
+                    f"from {self._mcp_servers_catalog_path}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not load MCP servers catalog from "
+                    f"{self._mcp_servers_catalog_path}: {e}"
+                )
+                self._mcp_servers_catalog = {}
+        return self._mcp_servers_catalog
+
+    def _build_available_tools_from_catalog(self, required_servers: List[str]) -> Dict[str, Any]:
+        """Build available_tools dict from the mcp_servers_info.json catalog.
+
+        This is more reliable than using the live-preloaded tools dict from
+        ``ADKTaskExecutor``, which can be empty when ``ResilientMcpToolset``
+        silently returns ``[]`` on a transient connection error at setup time
+        while the server becomes available later during actual execution.
+
+        The prefixing convention mirrors ``mcp_tools.create_toolset_for_server``:
+        ``<server_name_lowercased_and_underscored>_<tool_name>``.
+
+        ``transfer_to_agent`` (ADK internal routing) is always included.
+
+        Args:
+            required_servers: List of server names the task requires.
+
+        Returns:
+            Dict mapping prefixed tool names to tool-metadata dicts compatible
+            with the evaluator's ``available_tools`` format.
+        """
+        catalog = self._load_mcp_servers_catalog()
+        available_tools: Dict[str, Any] = {}
+
+        for server_name in required_servers:
+            server_data = catalog.get(server_name)
+            if server_data is None:
+                logger.warning(
+                    f"Server '{server_name}' not found in MCP servers catalog — "
+                    "valid_tool_name_rate may be inaccurate for this task"
+                )
+                continue
+
+            tools = server_data.get('tools', {})
+            prefix = server_name.replace(' ', '_').replace('-', '_').lower() + '_'
+
+            for tool_name, tool_info in tools.items():
+                prefixed_name = prefix + tool_name
+                available_tools[prefixed_name] = {
+                    'name': prefixed_name,
+                    'original_name': tool_name,
+                    'server': server_name,
+                    'description': tool_info.get('description', ''),
+                    'input_schema': tool_info.get('input_schema', {}),
+                    'agent': 'specialist',
+                }
+
+            logger.debug(
+                f"Catalog: added {len(tools)} tools from '{server_name}' (prefix: '{prefix}')"
+            )
+
+        # Always include the ADK-internal routing tool
+        available_tools['transfer_to_agent'] = {
+            'name': 'transfer_to_agent',
+            'original_name': 'transfer_to_agent',
+            'server': 'adk_internal',
+            'description': 'Switch control to other agent',
+            'input_schema': {'agent_name': 'string'},
+            'agent': 'coordinator',
+        }
+
+        return available_tools
+
     async def _prepare_server_configs(self, server_name: str, servers_info: Dict[str, Any], task_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """Prepare server configurations for task execution."""
         # Handle multi-server tasks (server names separated by '+')
@@ -626,7 +710,6 @@ class ADKBenchmarkRunner:
             'total_rounds': result_data.get('total_rounds', 0),
             'execution_results': result_data.get('execution_results', []),
             'planning_json_compliance': result_data.get('planning_json_compliance', 1.0),
-            'accumulated_information': result_data.get('accumulated_information', ''),
             'token_usage': {
                 'prompt_tokens': result_data.get('token_usage', {}).get('prompt_tokens', result_data.get('total_prompt_tokens', 0)),
                 'completion_tokens': result_data.get('token_usage', {}).get('completion_tokens', result_data.get('total_output_tokens', 0)),
@@ -652,15 +735,26 @@ class ADKBenchmarkRunner:
             concrete_task_description = task_data.get('description', '')
             dependency_analysis = task_data.get('dependency_analysis', None)
             
+            # Build available_tools from the static catalog (reliable even when
+            # ResilientMcpToolset returned [] during setup due to a transient
+            # connection error).  Fall back to the live-preloaded dict for any
+            # server not present in the catalog.
+            catalog_tools = self._build_available_tools_from_catalog(
+                task_execution_info.get('required_servers', [])
+            )
+            live_tools = result_data.get('available_tools', {})
+            # Merge: live tools first so catalog entries can override; catalog
+            # wins because it was built from a successful offline discovery run.
+            available_tools_for_eval = {**live_tools, **catalog_tools}
+
             # Run comprehensive evaluation
             evaluation = await evaluator.evaluate(
                 task=task_description,
                 execution_results=result_data.get('execution_results', []),
                 final_solution=result_data.get('solution', ''),
                 total_rounds=result_data.get('total_rounds', 0),
-                available_tools=result_data.get('available_tools', {}),
+                available_tools=available_tools_for_eval,
                 planning_json_compliance=result_data.get('planning_json_compliance', 1.0),
-                accumulated_information=result_data.get('accumulated_information', ''),
                 concrete_task_description=concrete_task_description,
                 dependency_analysis=dependency_analysis
             )
@@ -682,6 +776,42 @@ class ADKBenchmarkRunner:
         
         return base_result
     
+    def _build_run_config_snapshot(self) -> Dict[str, Any]:
+        """Build a snapshot of all effective configuration for this run.
+
+        Stored under ``run_metadata.config_snapshot`` in every result file so
+        results are fully self-describing and reproducible.
+        """
+        return {
+            # --- ADK model settings ---
+            'judge_model': adk_config_loader.get_judge_model(),
+            'default_agent_model': adk_config_loader.get_default_model(),
+            'compressor_model': (
+                adk_config_loader.get_compression_compressor_model() or '<inherits agent model>'
+            ),
+            # --- ContentCompressor thresholds ---
+            'compression_token_threshold': adk_config_loader.get_compression_token_threshold(),
+            'compression_tool_result_threshold': adk_config_loader.get_compression_tool_result_threshold(),
+            'compression_hard_limit_threshold': adk_config_loader.get_compression_hard_limit_threshold(),
+            # --- Execution settings ---
+            'task_timeout': adk_config_loader.get_task_timeout(),
+            'max_retries': adk_config_loader.get_max_retries(),
+            'retry_delay': adk_config_loader.get_retry_delay(),
+            # --- Benchmark feature flags ---
+            'use_fuzzy_descriptions': self.use_fuzzy_descriptions,
+            'enable_concrete_description_ref': self.enable_concrete_description_ref,
+            'enable_dependency_analysis_ref': adk_config_loader.is_dependency_analysis_ref_enabled(),
+            'enable_judge_stability': self.enable_judge_stability,
+            'judge_stability_runs': adk_config_loader.get_judge_stability_runs(),
+            'filter_problematic_tools': self.filter_problematic_tools,
+            'concurrent_summarization': self.concurrent_summarization,
+            'enable_distraction_servers': self.enable_distraction_servers,
+            'distraction_count': self.distraction_count,
+            # --- MCP ---
+            'resident_servers': adk_config_loader.get_resident_servers(),
+            'servers_catalog_path': adk_config_loader.get_servers_catalog_path(),
+        }
+
     async def _initialize_benchmark(self, selected_models: List[str] = None, task_limit: int = None) -> Dict[str, Any]:
         """Initialize benchmark by loading tasks and server configs."""
         try:
@@ -811,6 +941,7 @@ class ADKBenchmarkRunner:
                 'runner': 'adk',
                 'models_tested': list(available_models.keys()),
                 'tasks_per_model': len(tasks),
+                'config_snapshot': self._build_run_config_snapshot(),
             },
             'final_metrics': all_model_metrics,
             'task_run_results': all_model_task_results,
@@ -838,7 +969,7 @@ class ADKBenchmarkRunner:
             return await self._run_single_file_benchmark_core(selected_models, task_limit)
         
         # Check if user specified specific task file(s)
-        all_task_files = config_loader.get_all_task_files()
+        all_task_files = adk_config_loader.get_all_task_files()
         
         # Check if user specified comma-separated task files
         if self.tasks_file and ',' in self.tasks_file:
@@ -883,7 +1014,8 @@ class ADKBenchmarkRunner:
                     'run_metadata': {
                         'generated_at': datetime.utcnow().isoformat() + 'Z',
                         'runner': 'adk',
-                        'error': str(e)
+                        'error': str(e),
+                        'config_snapshot': self._build_run_config_snapshot(),
                     },
                     'final_metrics': self.last_cumulative_metrics.copy(),
                     'task_run_results': {}
@@ -987,6 +1119,7 @@ class ADKBenchmarkRunner:
                     'tasks_per_model': len(tasks),
                     'completed_tasks_current_model': len(current_model_results),
                     'total_tasks_current_model': len(tasks),
+                    'config_snapshot': self._build_run_config_snapshot(),
                 },
                 'current_model_progress': {
                     current_model: current_aggregated

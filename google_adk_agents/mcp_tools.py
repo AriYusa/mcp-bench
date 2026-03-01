@@ -70,7 +70,7 @@ def create_toolset_for_server(
         connection_params = SseConnectionParams(
             url=url,
             headers=headers if headers else None,
-            timeout=30.0,
+            timeout=60.0,
         )
         
         logger.info(f"Created SSE connection params for '{server_name}' at {url}")
@@ -96,7 +96,7 @@ def create_toolset_for_server(
         
         connection_params = StdioConnectionParams(
             server_params=server_params,
-            timeout=30.0
+            timeout=60.0
         )
         
         logger.info(f"Created STDIO connection params for '{server_name}'")
