@@ -11,6 +11,7 @@ Classes:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 from langfuse import get_client
 
@@ -122,6 +124,9 @@ class ADKBenchmarkRunner:
         
         # ADK-specific: List of available model names (ADK handles model configs internally)
         self.model_configs = adk_config_loader.get_available_models()
+
+        # Per-task results directory (lazy, set on first call to _get_results_dir)
+        self._results_dir: Optional[Path] = None
         
     async def load_tasks(self) -> List[Dict[str, Any]]:
         """Load benchmark tasks from JSON file.
@@ -495,16 +500,18 @@ class ADKBenchmarkRunner:
         description_type = "fuzzy" if self.use_fuzzy_descriptions else "detailed"
         ref_info = ""
         
+        # Support both 'task_description' (new format) and 'description' (legacy)
+        _detailed_desc = task_data.get('task_description', task_data.get('description', ''))
         if self.use_fuzzy_descriptions:
-            task_description = task_data.get('fuzzy_description', task_data.get('description', ''))
+            task_description = task_data.get('fuzzy_description', _detailed_desc)
             if self.enable_concrete_description_ref:
                 # Append concrete reference at end
-                concrete_desc = task_data.get('description', '')
+                concrete_desc = _detailed_desc
                 if concrete_desc and concrete_desc != task_description:
                     task_description += f"\n\nReference (for context): {concrete_desc}"
                     ref_info = " (with concrete ref)"
         else:
-            task_description = task_data.get('description', '')
+            task_description = _detailed_desc
         
         return {
             'task_id': task_id,
@@ -776,6 +783,75 @@ class ADKBenchmarkRunner:
         
         return base_result
     
+    # ------------------------------------------------------------------
+    # Per-task result persistence helpers
+    # ------------------------------------------------------------------
+
+    def _compute_config_hash(self) -> str:
+        """Return a short SHA-256 hex digest of the ADK config YAML file.
+
+        The hash is used as the results directory name so that runs with
+        different configs are stored in separate directories.
+        """
+        config_path = Path(__file__).parent / "adk_benchmark_config.yaml"
+        if config_path.exists():
+            raw = config_path.read_bytes()
+        else:
+            raw = b""
+        return hashlib.sha256(raw).hexdigest()[:12]
+
+    def _get_results_dir(self) -> Path:
+        """Return (and create) the per-config results directory.
+
+        Directory layout:  results/<config_hash>/
+        """
+        if self._results_dir is None:
+            config_hash = self._compute_config_hash()
+            # Place results/ next to the workspace root (two levels up from
+            # this file which lives inside google_adk_agents/).
+            workspace_root = Path(__file__).parent.parent
+            self._results_dir = workspace_root / "results" / config_hash
+            self._results_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"[ADK] Results directory: {self._results_dir}")
+        return self._results_dir
+
+    @staticmethod
+    def _task_result_filename(model_name: str, task_id: str) -> str:
+        """Build a safe filename for a single task result."""
+        safe_model = model_name.replace("/", "_").replace("\\", "_")
+        safe_task = task_id.replace("/", "_").replace("\\", "_")
+        return f"{safe_model}__{safe_task}.json"
+
+    def _task_result_path(self, model_name: str, task_id: str) -> Path:
+        """Full path for a single task result file."""
+        return self._get_results_dir() / self._task_result_filename(model_name, task_id)
+
+    def _task_result_exists(self, model_name: str, task_id: str) -> bool:
+        """Return True if the result file for this task+model already exists."""
+        return self._task_result_path(model_name, task_id).exists()
+
+    def _save_task_result(self, model_name: str, task_id: str, result: Dict[str, Any]) -> None:
+        """Persist a single task result to its own JSON file."""
+        path = self._task_result_path(model_name, task_id)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, indent=2, default=str)
+            logger.debug(f"[ADK] Task result saved: {path.name}")
+        except Exception as exc:
+            logger.warning(f"[ADK] Failed to save task result {path.name}: {exc}")
+
+    def _load_task_result(self, model_name: str, task_id: str) -> Optional[Dict[str, Any]]:
+        """Load an existing task result from disk (returns None on error)."""
+        path = self._task_result_path(model_name, task_id)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception as exc:
+            logger.warning(f"[ADK] Could not load cached result {path.name}: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
+
     def _build_run_config_snapshot(self) -> Dict[str, Any]:
         """Build a snapshot of all effective configuration for this run.
 
@@ -864,11 +940,11 @@ class ADKBenchmarkRunner:
         available_models = init_result['available_models']
         all_model_task_results: Dict[str, List[Dict[str, Any]]] = {}
         all_model_metrics: Dict[str, Dict[str, Any]] = {}
-        
-        # Generate incremental results filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        incremental_file = f"benchmark_results_{timestamp}_incremental.json"
-        
+
+        # Ensure per-task results directory is ready
+        results_dir = self._get_results_dir()
+        logger.info(f"[ADK] Per-task results will be stored in: {results_dir}")
+
         # Calculate total tasks across all models for overall progress
         total_tasks_all_models = len(available_models) * len(tasks)
         completed_tasks_all_models = 0
@@ -883,19 +959,37 @@ class ADKBenchmarkRunner:
                 model_results = []
                 completed_tasks = 0
                 failed_tasks = 0
+                skipped_tasks = 0
 
                 for i, task_info in enumerate(tasks, 1):
                     task_id = task_info.get('task', task_info).get('task_id', f'task_{i}')
                     logger.info(f"\n[ADK] Task {i}/{len(tasks)} (Overall: {completed_tasks_all_models + 1}/{total_tasks_all_models})")
                     logger.info(f"[ADK] Task ID: {task_id}")
-                    
+
+                    # --- Skip if result already exists on disk ---
+                    if self._task_result_exists(model_name, task_id):
+                        cached = self._load_task_result(model_name, task_id)
+                        if cached is not None:
+                            logger.info(f"[ADK] Skipping {task_id} — result already exists in {results_dir.name}")
+                            model_results.append(cached)
+                            completed_tasks_all_models += 1
+                            skipped_tasks += 1
+                            if cached.get('status') == 'completed':
+                                completed_tasks += 1
+                            else:
+                                failed_tasks += 1
+                            continue
+
                     # Execute single task (no LLM provider needed for ADK)
                     result = await self.execute_single_task_with_model(
                         task_info, 
                         servers_info, 
                         model_name
                     )
-                    
+
+                    # Persist result immediately (each task is its own checkpoint)
+                    self._save_task_result(model_name, task_id, result)
+
                     model_results.append(result)
                     completed_tasks_all_models += 1
                     
@@ -906,18 +1000,7 @@ class ADKBenchmarkRunner:
                     
                     # Log progress
                     success_rate = (completed_tasks / (completed_tasks + failed_tasks)) * 100 if (completed_tasks + failed_tasks) > 0 else 0
-                    logger.info(f"[ADK] Progress: {completed_tasks}/{len(tasks)} successful ({success_rate:.1f}% success rate)")
-                    
-                    # Save incremental results after each task
-                    await self._save_incremental_results(
-                        incremental_file, 
-                        model_name, 
-                        model_results, 
-                        tasks, 
-                        available_models,
-                        all_model_task_results,
-                        all_model_metrics
-                    )
+                    logger.info(f"[ADK] Progress: {completed_tasks}/{len(tasks)} successful, {skipped_tasks} skipped ({success_rate:.1f}% success rate)")
                 
                 # Aggregate results for this model
                 logger.info(f"\n[ADK] Aggregating results for model {model_name}...")

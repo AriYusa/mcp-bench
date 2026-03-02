@@ -1100,6 +1100,7 @@ Examples:
     parser.add_argument(
         '--disable-judge-stability',
         action='store_true',
+        default=None,
         help=f'Disable LLM Judge stability testing (default: {"enabled" if default_judge_stability else "disabled"})'
     )
     
@@ -1108,6 +1109,7 @@ Examples:
     parser.add_argument(
         '--disable-filter-problematic-tools',
         action='store_true',
+        default=None,
         help=f'Disable filtering of known problematic tools (default: {"enabled" if default_filter_tools else "disabled"})'
     )
     
@@ -1115,6 +1117,7 @@ Examples:
     parser.add_argument(
         '--disable-concurrent-summarization',
         action='store_true',
+        default=None,
         help=f'Disable concurrent content summarization (default: {"enabled" if default_concurrent_summarization else "disabled"})'
     )
     
@@ -1122,6 +1125,7 @@ Examples:
     parser.add_argument(
         '--disable-fuzzy',
         action='store_true',
+        default=None,
         help=f'Use detailed task descriptions instead of fuzzy descriptions (default: {"fuzzy" if default_use_fuzzy else "detailed"})'
     )
     
@@ -1191,24 +1195,35 @@ def _create_runner_and_get_models(args, tasks_file, enable_distraction):
     # Choose runner based on --use-adk flag
     if args.use_adk:
         from google_adk_agents.adk_benchmark_runner import ADKBenchmarkRunner
+        from google_adk_agents import adk_config_loader
+        # For each flag, if not explicitly passed, defer to adk_benchmark_config.yaml
+        adk_judge_stability = (not args.disable_judge_stability) if args.disable_judge_stability is not None else adk_config_loader.is_judge_stability_enabled()
+        adk_filter_tools = (not args.disable_filter_problematic_tools) if args.disable_filter_problematic_tools is not None else adk_config_loader.is_problematic_tools_filter_enabled()
+        adk_concurrent = (not args.disable_concurrent_summarization) if args.disable_concurrent_summarization is not None else adk_config_loader.is_concurrent_summarization_enabled()
+        adk_fuzzy = (not args.disable_fuzzy) if args.disable_fuzzy is not None else adk_config_loader.use_fuzzy_descriptions()
         runner = ADKBenchmarkRunner(
             tasks_file=tasks_file,
             enable_distraction_servers=enable_distraction,
             distraction_count=args.distraction_count,
-            enable_judge_stability=not args.disable_judge_stability,
-            filter_problematic_tools=not args.disable_filter_problematic_tools,
-            concurrent_summarization=not args.disable_concurrent_summarization,
-            use_fuzzy_descriptions=not args.disable_fuzzy,
+            enable_judge_stability=adk_judge_stability,
+            filter_problematic_tools=adk_filter_tools,
+            concurrent_summarization=adk_concurrent,
+            use_fuzzy_descriptions=adk_fuzzy,
         )
     else:
+        # For each flag, if not explicitly passed, defer to benchmark_config.yaml
+        root_judge_stability = (not args.disable_judge_stability) if args.disable_judge_stability is not None else config_loader.is_judge_stability_enabled()
+        root_filter_tools = (not args.disable_filter_problematic_tools) if args.disable_filter_problematic_tools is not None else config_loader.is_problematic_tools_filter_enabled()
+        root_concurrent = (not args.disable_concurrent_summarization) if args.disable_concurrent_summarization is not None else config_loader.is_concurrent_summarization_enabled()
+        root_fuzzy = (not args.disable_fuzzy) if args.disable_fuzzy is not None else config_loader.use_fuzzy_descriptions()
         runner = BenchmarkRunner(
             tasks_file=tasks_file,
             enable_distraction_servers=enable_distraction,
             distraction_count=args.distraction_count,
-            enable_judge_stability=not args.disable_judge_stability,
-            filter_problematic_tools=not args.disable_filter_problematic_tools,
-            concurrent_summarization=not args.disable_concurrent_summarization,
-            use_fuzzy_descriptions=not args.disable_fuzzy,
+            enable_judge_stability=root_judge_stability,
+            filter_problematic_tools=root_filter_tools,
+            concurrent_summarization=root_concurrent,
+            use_fuzzy_descriptions=root_fuzzy,
         )
     available_models = list(runner.model_configs.keys())
     

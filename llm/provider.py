@@ -15,8 +15,9 @@ from typing import Any, Optional, Tuple, Set, Type, Dict
 import json_repair
 import litellm
 from pydantic import BaseModel
+from langfuse import get_client
 
-litellm.callbacks = ["langfuse_otel"]
+#  litellm.callbacks = ["langfuse_otel"]
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,17 @@ class LLMProvider:
             model_name: Name of the model to use (LiteLLM format, e.g., 'azure/gpt-4o', 'anthropic/claude-sonnet-4-5-20250929')
         """
         self.model_name: str = model_name
+        self._validate_model()
+
+    def _validate_model(self) -> None:
+        """Check if the model is known to LiteLLM. Raises ValueError if not found."""
+        try:
+            litellm.get_model_info(self.model_name)
+        except Exception:
+            raise ValueError(
+                f"Model '{self.model_name}' is not recognized by LiteLLM. "
+                "Check the model name at https://docs.litellm.ai/docs/providers"
+            )
 
     def _is_token_limit_error(self, error_message: str) -> bool:
         """Check if the error is related to token limits.
@@ -115,7 +127,7 @@ class LLMProvider:
             
         return None, None
 
-    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int, return_usage: bool = False) -> Any:
+    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int, return_usage: bool = False, log_to_langfuse_name: str = None) -> Any:
         """Get a completion from the LLM with retry mechanism.
         
         Args:
@@ -123,7 +135,7 @@ class LLMProvider:
             user_prompt: User's input prompt
             max_tokens: Maximum tokens for the response
             return_usage: If True, returns tuple of (content, usage_dict)
-            
+            log_to_langfuse_name: If set, logs the completion to LangFuse with the given name
         Returns:
             The LLM's response as a string, or tuple of (content, usage_dict) if return_usage=True
             
@@ -150,9 +162,29 @@ class LLMProvider:
             try:
                 logger.info(f"Generating completion using {self.model_name} (attempt {attempt + 1}/{max_attempts}, max_tokens: {max_tokens})")
                 
-                response = await litellm.acompletion(**params)
-                content = response.choices[0].message.content
+                if log_to_langfuse_name:
+                   langfuse = get_client()
+                   with langfuse.start_as_current_observation(
+                        as_type="generation",
+                        name=log_to_langfuse_name,
+                        model=self.model_name,
+                        input=params["messages"],
+                    ) as span:
                 
+                        response = await litellm.acompletion(**params)
+                        content = response.choices[0].message.content
+                        span.update(
+                            output=content,
+                            usage_details={
+                                "input": response.usage.prompt_tokens,
+                                "output": response.usage.completion_tokens,
+                                "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                            },
+                        )
+                else:
+                    response = await litellm.acompletion(**params)
+                    content = response.choices[0].message.content
+
                 if content is None or content.strip() == "":
                     raise ValueError("Empty content received from LLM")
                 
@@ -196,6 +228,7 @@ class LLMProvider:
         user_prompt: str,
         max_tokens: int,
         response_model: Type[BaseModel],
+        log_to_langfuse_name: str = None,
     ) -> BaseModel:
         """Get a structured completion using json_schema response_format if supported.
 
@@ -209,6 +242,7 @@ class LLMProvider:
             user_prompt: User's input prompt
             max_tokens: Maximum tokens for the response
             response_model: Pydantic model class that defines the expected output shape
+            log_to_langfuse_name: If set, logs the completion to LangFuse with the given name
 
         Returns:
             An instance of response_model populated with the LLM's output
@@ -239,8 +273,27 @@ class LLMProvider:
                         f"Generating structured completion using {self.model_name} "
                         f"(attempt {attempt + 1}/{max_attempts}, max_tokens: {max_tokens})"
                     )
-                    response = await litellm.acompletion(**params)
-                    content = response.choices[0].message.content
+                    if log_to_langfuse_name:
+                        langfuse = get_client()
+                        with langfuse.start_as_current_observation(
+                            as_type="generation",
+                            name=log_to_langfuse_name,
+                            model=self.model_name,
+                            input=params["messages"],
+                        ) as span:
+                            response = await litellm.acompletion(**params)
+                            content = response.choices[0].message.content
+                            span.update(
+                                output=content,
+                                usage_details={
+                                    "input": response.usage.prompt_tokens,
+                                    "output": response.usage.completion_tokens,
+                                    "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                                },
+                            )
+                    else:
+                        response = await litellm.acompletion(**params)
+                        content = response.choices[0].message.content
                     if content is None or content.strip() == "":
                         raise ValueError("Empty content received from LLM")
                     if attempt > 0:
@@ -269,7 +322,7 @@ class LLMProvider:
                 f"Model {self.model_name} does not support response_schema; "
                 "falling back to text completion with manual JSON parsing"
             )
-            content = await self.get_completion(system_prompt, user_prompt, max_tokens)
+            content = await self.get_completion(system_prompt, user_prompt, max_tokens, log_to_langfuse_name=log_to_langfuse_name)
             data = self.clean_and_parse_json(content)
             return response_model.model_validate(data)
 
@@ -323,3 +376,19 @@ class LLMProvider:
             raise ValueError(f"Unexpected error parsing JSON from LLM response: {e}. Raw response: {raw_json[:500] if 'raw_json' in locals() else 'N/A'}")
         
         
+if __name__ == "__main__":
+    # Basic test of the LLMProvider
+    async def test_provider():
+        provider = LLMProvider("anthropic/claude-sonnet-4-6")
+        system_prompt = "You are a helpful assistant that answers questions."
+        user_prompt = "What is the capital of France?"
+        max_tokens = 50
+        
+        try:
+            response, usage = await provider.get_completion(system_prompt, user_prompt, max_tokens, return_usage=True, log_to_langfuse_name="test_completion")
+            print("Response:", response)
+            print("Usage:", usage)
+        except Exception as e:
+            print(f"Error during completion: {e}")
+    
+    asyncio.run(test_provider())

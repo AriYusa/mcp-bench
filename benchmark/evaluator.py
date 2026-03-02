@@ -44,7 +44,7 @@ class JudgeEvaluation(PydanticBaseModel):
 
 class LLMProvider(Protocol):
     """Protocol for LLM providers used in evaluation"""
-    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int, log_to_langfuse_name: str = None) -> str:
         ...
 
     async def get_completion_structured(
@@ -53,6 +53,7 @@ class LLMProvider(Protocol):
         user_prompt: str,
         max_tokens: int,
         response_model: Type[PydanticBaseModel],
+        log_to_langfuse_name: str = None
     ) -> PydanticBaseModel:
         ...
 
@@ -265,7 +266,7 @@ class LLMJudge:
             "   - Complete and accurate parameters (not just valid, but IDEAL)",
             "   - Zero redundancy (no repeated or unnecessary calls)",
             "   - Proper error handling (graceful recovery from ANY failure)",
-            "   - Efficient execution (parallel when possible, minimal rounds)",
+            "   - Efficient execution (parallel when possible, minimal rounds). Note: tools executed in one round are executed in parallel.",
             "   - Concise output (no verbose explanations unless requested)",
             "3. If ANY of the above is missing, that portion is NOT perfectly executed (counts as 0%)",
             "4. Example: Task completed correctly but with 1 redundant call = that portion is 0% perfect",
@@ -302,9 +303,11 @@ class LLMJudge:
             "- 8/20 tools optimal (60% defect rate) = Score 4",
             "",
             "Parallelism & Efficiency:",
+            "IMPORTANT CONSTRAINT: Agents are capped at 10 tool calls per round to avoid exceeding the context window.",
+            "Do NOT penalize an agent for splitting tool calls across multiple rounds when the total parallelizable set exceeds 10.",
+            "Only penalize if the agent failed to parallelize tools that COULD fit within the 10-tool cap in a single round.",
             "- 9/10 parallelizable tasks done in parallel (10% missed) = Score 9",
-            "- 8/10 parallelizable tasks done in parallel (20% missed) = Score 8",
-            "- 6/10 parallelizable tasks done in parallel (40% missed) = Score 6",
+            "- 8/10 parallelizable tasks done in parallel (20% missed) = Score 6",
             "- 4/10 parallelizable tasks done in parallel (60% missed) = Score 4",
             "",
             "Grounding:",
@@ -537,7 +540,8 @@ class LLMJudge:
             compressed = await self.llm.get_completion(
                 system_prompt,
                 user_prompt,
-                target_tokens
+                target_tokens,
+                log_to_langfuse_name="compress_for_judge"
             )
             
             compressed_tokens = len(compressed) // 4
@@ -559,6 +563,12 @@ class LLMJudge:
             round_num = tool_result.get("round", 0)
             execution_results_by_round[round_num].append(tool_result)
 
+        # Calculate per-result character budget so the total stays under ~100K tokens
+        # (approximation: 4 chars ≈ 1 token → 100K tokens ≈ 400K chars)
+        total_budget_chars = 100_000 * 4
+        num_results = len(execution_results) if execution_results else 1
+        max_response_chars = total_budget_chars // num_results
+
         # Format each round's information
         formatted_rounds = []
         for round_num in sorted(execution_results_by_round.keys()):
@@ -575,13 +585,18 @@ class LLMJudge:
                     response = resp_dict.get('output') or resp_dict.get('content') or resp_dict.get('structuredContent') or resp_dict
                 else:
                     response = tool_result.get('response', 'No response')
-                tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response}")
+
+                response_str = str(response)
+                if len(response_str) > max_response_chars:
+                    response_str = response_str[:max_response_chars] + f"... [truncated]"
+
+                tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response_str}")
 
                 if tool_result.get('compressed'):
                     before = tool_result.get('compression_tokens_before', 0)
                     after = tool_result.get('compression_tokens_after', 0)
                     tool_info_text_parts.append(
-                        f"[Long result compressed with LLM because, therefore might be diffrernt from MCP server/tool has returned initially to request. Compression {before}→{after} tokens]"
+                        f"[Long result compressed, therefore, might be different from what MCP server/tool has returned originally. Compression {before}→{after} tokens]"
                     )
 
                 formatted_rounds.append(" ".join(tool_info_text_parts))
@@ -665,6 +680,7 @@ class LLMJudge:
                         randomized_prompt,
                         config_loader.get_evaluation_max_tokens(),
                         JudgeEvaluation,
+                        log_to_langfuse_name=f"evaluation"
                     )
                     llm_end_time = time.time()
 
@@ -872,6 +888,9 @@ class LLMJudge:
             - 8/20 tools optimal (60% defect rate) = Score 4
             
             Parallelism & Efficiency:
+            IMPORTANT: Agents are capped at 10 tool calls per round to avoid context window overflow.
+            Do NOT penalize splitting >10 parallelizable calls across multiple rounds — that is expected and correct behavior.
+            Only penalize failure to parallelize tools that could fit within a single 10-call round.
             - 9/10 parallelizable tasks done in parallel (10% missed) = Score 9
             - 8/10 parallelizable tasks done in parallel (20% missed) = Score 8
             - 6/10 parallelizable tasks done in parallel (40% missed) = Score 6
@@ -936,6 +955,7 @@ class LLMJudge:
                 prompt,
                 15000,
                 JudgeEvaluation,
+                log_to_langfuse_name="evaluation"
             )
             llm_end_time = time.time()
 
