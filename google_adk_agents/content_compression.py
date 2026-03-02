@@ -81,16 +81,15 @@ class ContentCompressor(BasePlugin):
 
     Three-layer defense against context window overflow:
 
-    Layer 1 (after_tool_callback): Compresses large individual tool results
+    Tool Result Compression (after_tool_callback): Compresses large individual tool results
     before they are stored in history. Never breaks function_call/response
     ID pairings.
 
-    Layer 2 (before_model_callback, soft limit): If total context still
+    History Compression (before_model_callback, soft limit): If total context still
     exceeds token_threshold, summarises all of contents[1:] in one LLM call.
 
-    Layer 3 (rule-based fallback): If the LLM fails, doesn't reduce the
-    context, or total context exceeds hard_limit_threshold, truncates the
-    largest parts in-place without an LLM call.
+    Rule-Based History Comperssion (rule-based fallback): If the LLM fails, doesn't reduce the
+    context, or total context exceeds hard_limit_threshold, truncates history by removing middle rounds getails about function responces. 
     """
 
     def __init__(
@@ -104,12 +103,12 @@ class ContentCompressor(BasePlugin):
 
         Args:
             model_name: Model name for the LLM provider (LiteLLM format)
-            token_threshold: Soft token threshold to trigger Layer 2 (history
+            token_threshold: Soft token threshold to trigger History Compression (history
                 compression). Should be well below the model's hard context limit.
             tool_result_threshold: Token threshold for a single tool result to
-                trigger Layer 1 compression.
-            hard_limit_threshold: Hard token threshold above which Layer 2 is
-                skipped (LLM call itself would be too large) and Layer 3 fires
+                trigger Tool Result Compression compression.
+            hard_limit_threshold: Hard token threshold above which History Compression is
+                skipped (LLM call itself would be too large) and Rule-Based History Comperssion fires
                 immediately.
         """
         super().__init__(name="content_compressor")
@@ -146,19 +145,24 @@ class ContentCompressor(BasePlugin):
             f"hard_limit_threshold={hard_limit_threshold}, model={model_name}"
         )
     
-    def get_and_clear_compression_info(self, tool_name: str) -> Optional[Dict[str, int]]:
-        """Return and remove stored compression metadata for a given tool.
+    def get_and_clear_compression_info(self, tool_name: str, call_id: Optional[str] = None) -> Optional[Dict[str, int]]:
+        """Return and remove stored compression metadata for a given tool call.
 
         Called by the executor after a function_response event to annotate
-        execution results with Layer 1 compression details.
+        execution results with Tool Result Compression compression details.
 
         Args:
             tool_name: ADK tool name (as used in function_call / function_response)
+            call_id: The function call ID (from FunctionResponse.id). When provided,
+                     used as the primary lookup key to correctly handle multiple
+                     parallel calls to the same tool.
 
         Returns:
             Dict with keys ``tokens_before`` and ``tokens_after`` if the result
             was compressed, otherwise ``None``.
         """
+        if call_id is not None:
+            return self._tool_compression_metadata.pop(call_id, None)
         return self._tool_compression_metadata.pop(tool_name, None)
 
     def _get_llm_provider(self):
@@ -191,7 +195,7 @@ class ContentCompressor(BasePlugin):
         return None
 
     # ------------------------------------------------------------------
-    # Layer 1: Compress large tool results at source
+    # Tool Result Compression: Compress large tool results at source
     # ------------------------------------------------------------------
 
     async def after_tool_callback(
@@ -202,7 +206,7 @@ class ContentCompressor(BasePlugin):
         tool_context: Any,
         result: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """Compress oversized tool results before they enter history (Layer 1).
+        """Compress oversized tool results before they enter history (Tool Result Compression).
 
         Fires after every tool call. Estimates the token count of the result.
         If it exceeds tool_result_threshold, calls the LLM to produce a
@@ -229,8 +233,43 @@ class ContentCompressor(BasePlugin):
             return None  # Small enough — no compression needed
 
         tool_name = getattr(tool, 'name', str(tool))
+        error_msg = result.get("isError") or result.get("error", "")
+
+        # Hard-limit guard: result too large to safely send to the LLM itself —
+        # skip the LLM call and truncate directly (mirrors before_model_callback logic)
+        if result_tokens >= self.hard_limit_threshold:
+            logger.warning(
+                f"[Tool Result Compression] Tool '{tool_name}' result is {result_tokens} tokens >= "
+                f"hard_limit {self.hard_limit_threshold}. Skipping LLM, truncating directly."
+            )
+            target_chars = self.tool_result_threshold * 4  # ≈ tool_result_threshold tokens
+            half = target_chars // 2
+            truncated_text = (
+                result_text[:half]
+                + f"\n\n[...{len(result_text) - target_chars} chars truncated — "
+                f"result exceeded hard limit...]\n\n"
+                + result_text[-half:]
+            )
+            compressed_tokens = _estimate_tokens(truncated_text, self.model_name)
+            tokens_saved = result_tokens - compressed_tokens
+            self.tool_result_compressions += 1
+            self.total_tokens_saved += tokens_saved
+            metadata_key = tool_context.function_call_id if tool_context.function_call_id else tool_name
+            self._tool_compression_metadata[metadata_key] = {
+                "compression_method": "rule-based",
+                "tokens_before": result_tokens,
+                "tokens_after": compressed_tokens,
+            }
+            logger.info(
+                f"[Tool Result Compression] '{tool_name}': {result_tokens} -> {compressed_tokens} tokens "
+                f"({tokens_saved} saved) via rule-based truncation"
+            )
+            if error_msg:
+                return {"output": truncated_text, "error": error_msg}
+            return {"output": truncated_text}
+
         logger.info(
-            f"[Layer 1] Tool '{tool_name}' result is {result_tokens} tokens > "
+            f"[Tool Result Compression] Tool '{tool_name}' result is {result_tokens} tokens > "
             f"{self.tool_result_threshold}. Compressing..."
         )
 
@@ -245,7 +284,7 @@ class ContentCompressor(BasePlugin):
 
             if compressed_tokens >= result_tokens:
                 logger.warning(
-                    f"[Layer 1] LLM did not reduce tool result tokens "
+                    f"[Tool Result Compression] LLM did not reduce tool result tokens "
                     f"({compressed_tokens} >= {result_tokens}). Keeping original."
                 )
                 return None
@@ -254,18 +293,24 @@ class ContentCompressor(BasePlugin):
             self.tool_result_compressions += 1
             self.total_tokens_saved += tokens_saved
             logger.info(
-                f"[Layer 1] '{tool_name}': {result_tokens} -> {compressed_tokens} tokens "
+                f"[Tool Result Compression] '{tool_name}': {result_tokens} -> {compressed_tokens} tokens "
                 f"({tokens_saved} saved, {tokens_saved * 100 // result_tokens}% reduction)"
             )
-            # Record metadata so the executor can annotate execution_results
-            self._tool_compression_metadata[tool_name] = {
+            # Record metadata so the executor can annotate execution_results.
+            # Key by function_call_id (when available) so that multiple parallel
+            # calls to the same tool don't overwrite each other's metadata.
+            metadata_key = tool_context.function_call_id if tool_context.function_call_id else tool_name
+            self._tool_compression_metadata[metadata_key] = {
+                "compression_method": "LLM",
                 "tokens_before": result_tokens,
                 "tokens_after": compressed_tokens,
             }
+            if error_msg:
+                return {"output": compressed_text, "error": error_msg}
             return {"output": compressed_text}
 
         except Exception as e:
-            logger.error(f"[Layer 1] Tool result compression failed for '{tool_name}': {e}")
+            logger.error(f"[Tool Result Compression] Tool result compression failed for '{tool_name}': {e}")
             return None
 
     @observe(as_type="generation")
@@ -276,7 +321,7 @@ class ContentCompressor(BasePlugin):
         result_text: str,
         user_query: str,
     ) -> str:
-        """Use LLM to compress a single tool result (used by Layer 1).
+        """Use LLM to compress a single tool result (used by Tool Result Compression).
 
         Args:
             tool_name: Name of the tool that produced the result
@@ -341,7 +386,7 @@ COMPRESSED SUMMARY:"""
         return compressed.strip()
 
     # ------------------------------------------------------------------
-    # Layer 2: Soft-limit whole-history compression
+    # History Compression: Soft-limit whole-history compression
     # ------------------------------------------------------------------
 
     async def before_model_callback(
@@ -350,11 +395,11 @@ COMPRESSED SUMMARY:"""
         callback_context: CallbackContext,
         llm_request: LlmRequest,
     ) -> Optional[LlmResponse]:
-        """Compress full conversation history if total tokens exceed the soft threshold (Layer 2).
+        """Compress full conversation history if total tokens exceed the soft threshold (History Compression).
 
         Fires before every LLM call. If total tokens are under token_threshold,
         returns immediately. If over hard_limit_threshold, skips the LLM call
-        entirely and goes straight to rule-based Layer 3 (the LLM call itself
+        entirely and goes straight to rule-based Rule-Based History Comperssion (the LLM call itself
         would be too expensive at that size).
 
         Otherwise performs a single LLM call that summarises ALL of contents[1:]
@@ -362,7 +407,7 @@ COMPRESSED SUMMARY:"""
         block. Assumes all function_call/response pairs are complete by the time
         this callback fires (which is always the case in ADK's execution model).
 
-        Falls back to Layer 3 if the LLM fails or doesn't reduce tokens.
+        Falls back to Rule-Based History Comperssion if the LLM fails or doesn't reduce tokens.
 
         Args:
             callback_context: ADK callback context
@@ -382,10 +427,10 @@ COMPRESSED SUMMARY:"""
             return None  # Under soft threshold — nothing to do
 
         # If already past the hard limit, skip the LLM call — go straight to
-        # rule-based truncation (Layer 3)
+        # rule-based truncation (Rule-Based History Comperssion)
         if total_tokens >= self.hard_limit_threshold:
             logger.warning(
-                f"[Layer 3] Context is {total_tokens} tokens >= hard_limit "
+                f"[Rule-Based History Comperssion] Context is {total_tokens} tokens >= hard_limit "
                 f"{self.hard_limit_threshold}. Skipping LLM, applying rule-based truncation."
             )
             self._apply_rule_based_compression(contents)
@@ -393,7 +438,7 @@ COMPRESSED SUMMARY:"""
             return None
 
         logger.warning(
-            f"[Layer 2] Context is {total_tokens} tokens > soft threshold "
+            f"[History Compression] Context is {total_tokens} tokens > soft threshold "
             f"{self.token_threshold}. Summarising full history with LLM..."
         )
 
@@ -415,8 +460,8 @@ COMPRESSED SUMMARY:"""
 
             if compressed_tokens >= history_tokens:
                 logger.warning(
-                    f"[Layer 2] LLM did not reduce history tokens "
-                    f"({compressed_tokens} >= {history_tokens}). Falling back to Layer 3."
+                    f"[History Compression] LLM did not reduce history tokens "
+                    f"({compressed_tokens} >= {history_tokens}). Falling back to Rule-Based History Comperssion."
                 )
                 self._apply_rule_based_compression(contents)
                 llm_request.contents = contents
@@ -426,7 +471,7 @@ COMPRESSED SUMMARY:"""
             self.compression_count += 1
             self.total_tokens_saved += tokens_saved
             logger.info(
-                f"[Layer 2] History compressed: {history_tokens} -> {compressed_tokens} tokens "
+                f"[History Compression] History compressed: {history_tokens} -> {compressed_tokens} tokens "
                 f"({tokens_saved} saved, {tokens_saved * 100 // history_tokens}% reduction)"
             )
 
@@ -442,18 +487,18 @@ COMPRESSED SUMMARY:"""
             contents.append(compressed_content)
 
         except Exception as e:
-            logger.error(f"[Layer 2] LLM history compression failed: {e}. Falling back to Layer 3.")
+            logger.error(f"[History Compression] LLM history compression failed: {e}. Falling back to Rule-Based History Comperssion.")
             self._apply_rule_based_compression(contents)
 
         llm_request.contents = contents
         return None
     
     # ------------------------------------------------------------------
-    # Layer 3: Rule-based fallback truncation
+    # Rule-Based History Comperssion: Rule-based fallback truncation
     # ------------------------------------------------------------------
 
     def _apply_rule_based_compression(self, contents: List[types.Content]) -> None:
-        """Truncate the largest parts in-place without any LLM call (Layer 3).
+        """Truncate the largest parts in-place without any LLM call (Rule-Based History Comperssion).
 
         Called when LLM compression fails, doesn't reduce context, or the hard
         token limit is already exceeded. Operates on contents[1:] only, never
@@ -462,9 +507,11 @@ COMPRESSED SUMMARY:"""
         Args:
             contents: Full contents list to modify in-place
         """
-        logger.warning("[Layer 3] Applying rule-based truncation of largest parts.")
-        # Skip contents[0] (the initial user query)
-        self._truncate_largest_parts(contents[1:])
+        logger.warning("[Rule-Based History Comperssion] Applying rule-based truncation of largest parts.")
+        self._truncate_middle_rounds(contents)
+
+
+        
 
     # ------------------------------------------------------------------
     # LLM helpers
@@ -476,7 +523,7 @@ COMPRESSED SUMMARY:"""
         history_text: str,
         user_query: str,
     ) -> str:
-        """Use LLM to compress the full conversation history (used by Layer 2).
+        """Use LLM to compress the full conversation history (used by History Compression).
 
         Args:
             history_text: Serialised text of all history contents (excluding
@@ -534,104 +581,131 @@ COMPRESSED SUMMARY:"""
         self.compression_total_tokens += usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
         return compressed.strip()
     
-    def _truncate_largest_parts(self, contents: List[types.Content]) -> None:
-        """Truncate the largest function_response parts in-place as a fallback.
-        
-        Finds the largest text/function_response parts and truncates them
-        to reduce total size.
-        
+    def _truncate_middle_rounds(self, contents: List[types.Content]) -> None:
+        """Collapse all but the last round into compact text summaries (Rule-Based History Compression).
+
+        A "round" is one role="model" content followed by zero or more role="tool"
+        contents that carry its function_response parts. Round numbers are
+        derived by counting model-role contents in order — no external metadata
+        needed.
+
+        function_call and function_response parts are matched by their shared
+        call ID so that tool name, args, and success status are always reported
+        together even when multiple tools were called in parallel.
+
+        contents[0] (the original user query) is never touched.
+
         Args:
-            contents: List of Content objects to modify in-place
+            contents: Full contents list to modify in-place
         """
-        # Collect all parts with their sizes
-        parts_with_sizes = []
-        for content in contents:
-            if not content or not content.parts:
-                continue
-            for i, part in enumerate(content.parts):
-                if hasattr(part, 'function_response') and part.function_response:
-                    fr = part.function_response
-                    response = getattr(fr, 'response', {})
-                    try:
-                        text = json.dumps(response, default=str)
-                    except Exception:
-                        text = str(response)
-                    parts_with_sizes.append((content, i, len(text), 'function_response'))
-                elif hasattr(part, 'text') and part.text:
-                    parts_with_sizes.append((content, i, len(part.text), 'text'))
-        
-        # Sort by size descending
-        parts_with_sizes.sort(key=lambda x: x[2], reverse=True)
-        
-        # Truncate top 3 largest parts
-        for content, part_idx, size, part_type in parts_with_sizes[:3]:
-            if size <= 10_000:  # Don't truncate small parts
-                continue
-                
-            target_chars = min(size // 4, 40_000)  # Reduce to 25% or 40K chars max
-            part = content.parts[part_idx]
-            
-            if part_type == 'function_response':
-                fr = part.function_response
-                response = getattr(fr, 'response', {})
-                truncated = self._truncate_dict_values(response, target_chars)
-                # We can't easily modify the function_response in place,
-                # so replace the part with a text summary
-                name = getattr(fr, 'name', 'unknown_tool')
-                try:
-                    truncated_str = json.dumps(truncated, default=str)
-                except Exception:
-                    truncated_str = str(truncated)[:target_chars]
-                content.parts[part_idx] = types.Part.from_text(
-                    text=f"[Truncated response from {name}, original {size} chars]: {truncated_str}"
-                )
-            elif part_type == 'text' and size > target_chars:
-                original_text = part.text
-                keep_start = target_chars // 2
-                keep_end = target_chars // 2
-                content.parts[part_idx] = types.Part.from_text(
-                    text=f"{original_text[:keep_start]}\n\n[...{size - target_chars} chars truncated...]\n\n{original_text[-keep_end:]}"
-                )
-            
-            logger.info(f"Truncated {part_type} part from {size} chars to ~{target_chars} chars")
-    
-    def _truncate_dict_values(self, d: dict, max_total_chars: int) -> dict:
-        """Truncate string values in a dict to fit within max_total_chars.
-        
-        Args:
-            d: Dictionary to truncate
-            max_total_chars: Maximum total characters for all string values
-            
-        Returns:
-            New dictionary with truncated values
-        """
-        if not isinstance(d, dict):
-            s = str(d)
-            if len(s) > max_total_chars:
-                return s[:max_total_chars] + f"...[truncated from {len(s)} chars]"
-            return d
-        
-        result = {}
-        # First pass: find total size and identify large values
-        for key, value in d.items():
-            if isinstance(value, str) and len(value) > max_total_chars // 2:
-                # Truncate large string values
-                truncated = value[:max_total_chars // 2]
-                result[key] = f"{truncated}...[truncated from {len(value)} chars]"
-            elif isinstance(value, (dict, list)):
-                kind = "dict" if isinstance(value, dict) else "list"
-                try:
-                    val_str = json.dumps(value, default=str)
-                except Exception:
-                    val_str = str(value)
-                if len(val_str) > max_total_chars // 2:
-                    result[key] = f"{val_str[:max_total_chars // 2]}...[truncated {kind} from {len(val_str)} chars]"
-                else:
-                    result[key] = value
-            else:
-                result[key] = value
-        
-        return result
+        # --- 1. Parse rounds from contents[1:] -------------------------------------------
+        # Each round: (round_num, model_content, [tool_contents])
+        rounds: List[tuple] = []
+        current_model: Optional[types.Content] = None
+        current_tools: List[types.Content] = []
+        round_num = 0
+
+        for content in contents[1:]:
+            if getattr(content, "role", None) == "model":
+                # Save previous round if one was in progress
+                if current_model is not None:
+                    rounds.append((round_num, current_model, current_tools))
+                round_num += 1
+                current_model = content
+                current_tools = []
+            elif getattr(content, "role", None) == "tool" and current_model is not None:
+                current_tools.append(content)
+            # Any other content (e.g. stray user messages) is intentionally dropped
+            # from middle rounds but will be kept as part of the last round if present.
+
+        # Flush the final in-progress round
+        if current_model is not None:
+            rounds.append((round_num, current_model, current_tools))
+
+        if len(rounds) <= 1:
+            # Nothing to collapse — only one round exists, keep it untouched
+            logger.info("[Rule-Based History Compression] Only 1 round found, nothing to truncate.")
+            return
+
+        original_len = len(contents)
+        middle_rounds = rounds[:-1]
+        last_round_num, last_model, last_tools = rounds[-1]
+
+        # --- 2. Build a compact summary for each middle round ----------------------------
+        summary_lines: List[str] = []
+
+        for rnum, model_content, tool_contents in middle_rounds:
+            lines = [f"[Round {rnum}]"]
+
+            # Extract the model's reasoning text (first text part, capped at 300 chars)
+            reasoning = ""
+            # Also collect function_calls keyed by call ID
+            call_map: Dict[str, tuple] = {}  # call_id -> (name, args_str)
+
+            if model_content.parts:
+                for part in model_content.parts:
+                    if not reasoning and hasattr(part, "text") and part.text:
+                        reasoning = part.text.strip()[:500]
+                        if len(part.text.strip()) > 500:
+                            reasoning += "…"
+                    if hasattr(part, "function_call") and part.function_call:
+                        fc = part.function_call
+                        name = getattr(fc, "name", "unknown")
+                        call_id = getattr(fc, "id", None) or name
+                        try:
+                            args_str = json.dumps(getattr(fc, "args", {}), default=str)[:200]
+                        except Exception:
+                            args_str = str(getattr(fc, "args", {}))
+                        call_map[call_id] = (name, args_str)
+
+            if reasoning:
+                lines.append(f"Reasoning: {reasoning}")
+
+            # Collect function_responses keyed by call ID -> error_msg (None = success)
+            # We use a separate set to distinguish "found with no error" from "not found".
+            response_map: Dict[str, Optional[str]] = {}  # call_id -> error_msg or None
+            for tool_content in tool_contents:
+                if not tool_content.parts:
+                    continue
+                for part in tool_content.parts:
+                    if hasattr(part, "function_response") and part.function_response:
+                        fr = part.function_response
+                        resp_id = getattr(fr, "id", None) or getattr(fr, "name", "unknown")
+                        response = getattr(fr, "response", {})
+                        err = response.get("isError") or response.get("error")
+                        response_map[resp_id] = str(err) if err else None
+
+            # Emit one line per call with matched result
+            if call_map:
+                lines.append("Tool calls:")
+                for call_id, (name, args_str) in call_map.items():
+                    if call_id not in response_map:
+                        status = "status unknown"
+                    else:
+                        matched_err = response_map[call_id]
+                        if matched_err:
+                            status = f"Failed with error: {matched_err[:500]}"
+                        else:
+                            status = "Succeeded: [response hidden for brevity]"
+                    lines.append(f"  - {name}({args_str}) → {status}")
+
+            summary_lines.append("\n".join(lines))
+
+        # --- 3. Wrap all summaries in a single user content ------------------------------
+        summary_text = "[Compressed history of previous rounds:\n\n" + "\n\n".join(summary_lines) + "]"
+        summary_content = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=summary_text)],
+        )
+
+        # --- 4. Rebuild contents in-place -----------------------------------------------
+        last_round_contents = [last_model] + last_tools
+        contents[:] = [contents[0], summary_content] + last_round_contents
+
+        logger.info(
+            f"[Rule-Based History Compression] Collapsed {len(middle_rounds)} middle round(s) "
+            f"into summary; contents reduced from {original_len} to {len(contents)}"
+        )
     
     def get_stats(self) -> Dict[str, Any]:
         """Get compression statistics.

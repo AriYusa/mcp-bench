@@ -84,19 +84,18 @@ def get_max_llm_invocations() -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 def get_default_model() -> str:
-    return get("adk_models.default_model", "anthropic/claude-sonnet-4-5-20250929")
+    return get("adk_models.default_model", "anthropic/claude-sonnet-4-6")
 
 
 def get_judge_model() -> str:
-    return get("adk_models.judge_model", "anthropic/claude-sonnet-4-5-20250929")
-
+    return get("adk_models.judge_model", "anthropic/claude-sonnet-4-6")
 
 def get_available_models() -> Dict[str, Any]:
     return get("adk_models.available_models", {
         "gemini-2.0-flash-exp": {"display_name": "Gemini 2.0 Flash Experimental"},
         "gemini-1.5-pro": {"display_name": "Gemini 1.5 Pro"},
         "gemini-1.5-flash": {"display_name": "Gemini 1.5 Flash"},
-        "anthropic/claude-sonnet-4-5-20250929": {"display_name": "Claude Sonnet 4.5"},
+        "anthropic/claude-sonnet-4-6": {"display_name": "Claude Sonnet 4.6"},
     })
 
 

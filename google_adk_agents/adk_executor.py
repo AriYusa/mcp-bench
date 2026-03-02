@@ -475,11 +475,13 @@ class ADKTaskExecutor:
         """
         tool_name = getattr(function_call, 'name', 'unknown')
         args = getattr(function_call, 'args', {})
+        call_id = getattr(function_call, 'id', None)
         server_name, _ = self._extract_server_and_base_tool(tool_name)
         
         self.execution_results.append({
             "type": "tool_call",
             "tool": tool_name,
+            "call_id": call_id,
             "server": server_name,
             "round": round_count,
             "parameters": args,
@@ -488,6 +490,8 @@ class ADKTaskExecutor:
         })
             
         logger.info(f"Tool call: {tool_name}")
+
+
     
     def _track_tool_response(self, function_response) -> None:
         """Track a tool response for execution results.
@@ -497,6 +501,7 @@ class ADKTaskExecutor:
         """
         tool_name = getattr(function_response, 'name', 'unknown')
         response = getattr(function_response, 'response', {})
+        response_id = getattr(function_response, 'id', None)
         
         # Determine if the response indicates success or failure
         # Check for error indicators in the response
@@ -506,28 +511,40 @@ class ADKTaskExecutor:
             if response.get('isError') or response.get('error') or response.get('exception'):
                 is_success = False
         
-        # Check if Layer 1 compression was applied to this tool's result
-        compression_info = self.context_compressor_plugin.get_and_clear_compression_info(tool_name)
+        # Check if Tool Result Compression was applied to this tool's result.
+        # Use the response ID (== function_call_id) as the lookup key so that
+        # parallel calls to the same tool don't get each other's compression info.
+        compression_info = self.context_compressor_plugin.get_and_clear_compression_info(
+            tool_name, call_id=response_id
+        )
 
-        # Append response to the last tool call if it matches
+        # Match response to its tool call.
+        # Prefer matching by call_id (exact pairing) so that multiple parallel
+        # calls to the same tool are attributed correctly. Fall back to the
+        # previous reversed-name scan only when no ID is available.
         for result in reversed(self.execution_results):
-            if result.get("type") == "tool_call" and result.get("tool") == tool_name:
-                result["response"] = response
-                result["type"] = "tool_execution"
-                result["success"] = is_success
-                if not is_success:
-                    result["error"] = str(response)
-                # Annotate with compression details when Layer 1 fired
-                if compression_info:
-                    result["compressed"] = True
-                    result["compression_tokens_before"] = compression_info["tokens_before"]
-                    result["compression_tokens_after"] = compression_info["tokens_after"]
-                    result["compression_tokens_saved"] = (
-                        compression_info["tokens_before"] - compression_info["tokens_after"]
-                    )
-                else:
-                    result["compressed"] = False
-                break
+            if result.get("type") != "tool_call" or result.get("tool") != tool_name:
+                continue
+            # If both sides carry an ID, require it to match.
+            if response_id and result.get("call_id") and result["call_id"] != response_id:
+                continue
+            result["response"] = response
+            result["type"] = "tool_execution"
+            result["success"] = is_success
+            if not is_success:
+                result["error"] = str(response)
+            # Annotate with compression details when Tool Result Compression fired
+            if compression_info:
+                result["compressed"] = True
+                result["compression_method"] = compression_info.get("method", "unknown")
+                result["compression_tokens_before"] = compression_info["tokens_before"]
+                result["compression_tokens_after"] = compression_info["tokens_after"]
+                result["compression_tokens_saved"] = (
+                    compression_info["tokens_before"] - compression_info["tokens_after"]
+                )
+            else:
+                result["compressed"] = False
+            break
         else:
             raise ValueError(f"No matching tool call found for response: {tool_name}")
 

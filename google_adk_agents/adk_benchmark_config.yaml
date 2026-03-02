@@ -1,9 +1,9 @@
 adk_models:
   # Default coordinator / specialist model (used in google_adk_agents/config.py)
-  default_model: "anthropic/claude-sonnet-4-5-20250929"
+  default_model: "anthropic/claude-sonnet-4-6"
 
   # Judge model used to evaluate task results
-  judge_model: "anthropic/claude-sonnet-4-5-20250929"
+  judge_model: "anthropic/claude-sonnet-4-6"
 
   # Available model names for benchmark runs (keys shown in reports)
   available_models:
@@ -15,7 +15,7 @@ adk_models:
       display_name: "Gemini 1.5 Flash"
     "anthropic/claude-sonnet-4-5-20250929":
       display_name: "Claude Sonnet 4.5"
-    "anthropic/claude-sonnet-4-6-20260219":
+    "anthropic/claude-sonnet-4-6":
       display_name: "Claude Sonnet 4.6"
 
 content_compression:
@@ -94,7 +94,7 @@ benchmark:
   # Enable concurrent content summarization
   concurrent_summarization: true
   # Use fuzzy task descriptions
-  use_fuzzy_descriptions: False
+  use_fuzzy_descriptions: false
   # Provide original concrete description as reference during evaluation
   enable_concrete_description_ref_for_eval: true
 

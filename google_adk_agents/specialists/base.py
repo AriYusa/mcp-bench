@@ -61,12 +61,21 @@ def create_specialist_agent(
         logger.warning(f"No toolsets available for agent '{agent_key}' from servers {agent_servers}. Skipping creation.")
         return None
     
+    # Append the universal tool-call-limit constraint to the specialist instruction
+    tool_limit_note = """
+
+TOOL CALL LIMIT (CRITICAL CONSTRAINT):
+- You may call at most 10 tools per round to prevent context window overflow.
+- When a task requires more than 10 tool calls, prioritize the most relevant ones first and continue with the remaining tools in subsequent rounds.
+- Never sacrifice quality of selected calls because of this limit — choose the most impactful tools each round."""
+    constrained_instruction = agent_config.instruction + tool_limit_note
+
     # Create the ADK agent
     agent = Agent(
         name=agent_config.name,
         model=config.get_model_for_agent(model_override),
         description=agent_config.description,
-        instruction=agent_config.instruction,
+        instruction=constrained_instruction,
         tools=toolsets,  # Pass McpToolset instances
         # Allow transfer to parent (coordinator) and peers (other specialists)
         disallow_transfer_to_parent=False,
