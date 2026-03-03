@@ -498,18 +498,11 @@ class ADKBenchmarkRunner:
         
         # Determine which description to use
         description_type = "fuzzy" if self.use_fuzzy_descriptions else "detailed"
-        ref_info = ""
         
         # Support both 'task_description' (new format) and 'description' (legacy)
         _detailed_desc = task_data.get('task_description', task_data.get('description', ''))
         if self.use_fuzzy_descriptions:
             task_description = task_data.get('fuzzy_description', _detailed_desc)
-            if self.enable_concrete_description_ref:
-                # Append concrete reference at end
-                concrete_desc = _detailed_desc
-                if concrete_desc and concrete_desc != task_description:
-                    task_description += f"\n\nReference (for context): {concrete_desc}"
-                    ref_info = " (with concrete ref)"
         else:
             task_description = _detailed_desc
         
@@ -519,7 +512,7 @@ class ADKBenchmarkRunner:
             'task_description': task_description,
             'task_data': task_data,
             'description_type': description_type,
-            'ref_info': ref_info,
+            'ref_info': _detailed_desc,
             'required_servers': required_servers,
         }
     
@@ -738,8 +731,6 @@ class ADKBenchmarkRunner:
             logger.info(f"[ADK] Starting evaluation for task {task_id}")
             
             # Get task description (use concrete for evaluation if available)
-            task_description = task_data.get('description', '')
-            concrete_task_description = task_data.get('description', '')
             dependency_analysis = task_data.get('dependency_analysis', None)
             
             # Build available_tools from the static catalog (reliable even when
@@ -756,13 +747,13 @@ class ADKBenchmarkRunner:
 
             # Run comprehensive evaluation
             evaluation = await evaluator.evaluate(
-                task=task_description,
+                task=task_execution_info['task_description'],
                 execution_results=result_data.get('execution_results', []),
                 final_solution=result_data.get('solution', ''),
                 total_rounds=result_data.get('total_rounds', 0),
                 available_tools=available_tools_for_eval,
                 planning_json_compliance=result_data.get('planning_json_compliance', 1.0),
-                concrete_task_description=concrete_task_description,
+                concrete_task_description=task_execution_info['ref_info'] if self.enable_concrete_description_ref and task_execution_info.get('description_type') == "fuzzy" else None,
                 dependency_analysis=dependency_analysis
             )
             
