@@ -537,7 +537,7 @@ class LLMJudge:
             return accumulated_info
         
     def _get_accumulated_information_from_execution_results(self, execution_results: List[Dict[str, Any]]) -> str:
-        # Group per round information, and intert into prompt format
+        # Group per round information, and insert into prompt format
         execution_results_by_round = defaultdict(list)
         for tool_result in execution_results:
             round_num = tool_result.get("round", 0)
@@ -546,43 +546,91 @@ class LLMJudge:
         # Calculate per-result character budget so the total stays under ~100K tokens
         # (approximation: 4 chars ≈ 1 token → 100K tokens ≈ 400K chars)
         total_budget_chars = 100_000 * 4
-        num_results = len(execution_results) if execution_results else 1
+        # Count total result entries including inner tool calls
+        num_results = 0
+        for tool_result in execution_results:
+            num_results += 1
+            num_results += len(tool_result.get("inner_tool_calls", []))
+        num_results = max(num_results, 1)
         max_response_chars = total_budget_chars // num_results
 
         # Format each round's information
         formatted_rounds = []
         for round_num in sorted(execution_results_by_round.keys()):
             round_info = execution_results_by_round[round_num]
-            formatted_rounds.append(f"--- Summary of Round {round_num} ---")
             for tool_result in round_info:
-                tool_info_text_parts = []
-                tool_info_text_parts.append(f"Tool `{tool_result.get('tool')}` with parameters {json.dumps(tool_result.get('parameters', {}))}")
-                if tool_result.get('server'):
-                    tool_info_text_parts.append(f"on server {tool_result.get('server')}")
+                inner_calls = tool_result.get("inner_tool_calls")
+                thread = tool_result.get("thread")
 
-                if isinstance(tool_result.get('response'), dict):
-                    resp_dict = tool_result.get('response', {})
-                    response = resp_dict.get('output') or resp_dict.get('content') or resp_dict.get('structuredContent') or resp_dict
-                else:
-                    response = tool_result.get('response', 'No response')
-
-                response_str = str(response)
-                if len(response_str) > max_response_chars:
-                    response_str = response_str[:max_response_chars] + f"... [truncated]"
-
-                tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response_str}")
-
-                if tool_result.get('compressed'):
-                    before = tool_result.get('compression_tokens_before', 0)
-                    after = tool_result.get('compression_tokens_after', 0)
-                    tool_info_text_parts.append(
-                        f"[Long result compressed, therefore, might be different from what MCP server/tool has returned originally. Compression {before}→{after} tokens]"
+                # Build round header
+                if inner_calls is not None:
+                    # Tools-mode: hierarchical format with optional thread label
+                    if thread:
+                        header = f"--- Round {round_num}, Thread {thread}: {tool_result.get('tool')} ---"
+                    else:
+                        header = f"--- Round {round_num}: {tool_result.get('tool')} ---"
+                    formatted_rounds.append(header)
+                    formatted_rounds.append(
+                        f"  Request: {json.dumps(tool_result.get('parameters', {}))}"
                     )
 
-                formatted_rounds.append(" ".join(tool_info_text_parts))
+                    # Format inner tool calls grouped by sub_round
+                    inner_by_sub_round = defaultdict(list)
+                    for ic in inner_calls:
+                        sr = ic.get("sub_round", 0)
+                        inner_by_sub_round[sr].append(ic)
+
+                    for sr in sorted(inner_by_sub_round.keys()):
+                        formatted_rounds.append(f"  [Sub-round {sr}]")
+                        for ic in inner_by_sub_round[sr]:
+                            self._format_tool_entry(ic, formatted_rounds, max_response_chars, indent="    ")
+
+                    # Agent-tool overall result
+                    agent_response = self._extract_response_str(tool_result, max_response_chars)
+                    status = "succeeded" if tool_result.get("success", False) else "failed"
+                    formatted_rounds.append(f"  Agent result ({status}): {agent_response}")
+                else:
+                    # Legacy / sub_agents mode: flat format (backward compatible)
+                    formatted_rounds.append(f"--- Summary of Round {round_num} ---")
+                    self._format_tool_entry(tool_result, formatted_rounds, max_response_chars)
+
             formatted_rounds.append("")  # Empty line between rounds
         
         return "\n".join(formatted_rounds).strip()
+
+    @staticmethod
+    def _extract_response_str(tool_result: Dict[str, Any], max_chars: int) -> str:
+        """Extract and truncate response string from a tool result entry."""
+        if isinstance(tool_result.get('response'), dict):
+            resp_dict = tool_result.get('response', {})
+            response = resp_dict.get('output') or resp_dict.get('content') or resp_dict.get('structuredContent') or resp_dict
+        else:
+            response = tool_result.get('response', 'No response')
+        response_str = str(response)
+        if len(response_str) > max_chars:
+            response_str = response_str[:max_chars] + "... [truncated]"
+        return response_str
+
+    @staticmethod
+    def _format_tool_entry(tool_result: Dict[str, Any], lines: List[str],
+                           max_response_chars: int, indent: str = "") -> None:
+        """Format a single tool execution entry and append to *lines*."""
+        tool_info_text_parts = []
+        tool_info_text_parts.append(f"Tool `{tool_result.get('tool')}` with parameters {json.dumps(tool_result.get('parameters', {}))}")
+        if tool_result.get('server'):
+            tool_info_text_parts.append(f"on server {tool_result.get('server')}")
+
+        response_str = LLMJudge._extract_response_str(tool_result, max_response_chars)
+        tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response_str}")
+
+        if tool_result.get('compressed'):
+            before = tool_result.get('compression_tokens_before', 0)
+            after = tool_result.get('compression_tokens_after', 0)
+            tool_info_text_parts.append(
+                f"[Long result compressed, therefore, might be different from what MCP server/tool has returned originally. Compression {before}→{after} tokens]"
+            )
+
+        lines.append(f"{indent}{' '.join(tool_info_text_parts)}")
 
     async def evaluate_task_performance(self, task: str, final_solution: str, 
                                       execution_results: List[Dict[str, Any]], 
@@ -1011,6 +1059,11 @@ class LLMJudge:
         if not execution_results:
             summary_parts.append("No tools were executed.")
         else:
+            # Collect inner tool calls for statistics
+            all_inner = []
+            for r in execution_results:
+                all_inner.extend(r.get("inner_tool_calls", []))
+
             successful_tools = [r for r in execution_results if safe_get(r, 'success')]
             failed_tools = [r for r in execution_results if not safe_get(r, 'success')]
             
@@ -1020,6 +1073,13 @@ class LLMJudge:
                 f"Successful: {len(successful_tools)}",
                 f"Failed: {len(failed_tools)}"
             ])
+
+            if all_inner:
+                inner_ok = [ic for ic in all_inner if ic.get("success")]
+                inner_fail = [ic for ic in all_inner if not ic.get("success")]
+                summary_parts.append(
+                    f"Inner tool executions: {len(all_inner)} (ok={len(inner_ok)}, fail={len(inner_fail)})"
+                )
             
             if successful_tools:
                 successful_tool_names = [safe_get(r, 'tool', 'unknown') for r in successful_tools]

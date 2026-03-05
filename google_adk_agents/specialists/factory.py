@@ -32,6 +32,7 @@ class SpecialistAgentFactory:
         server_configs: List[Dict[str, Any]],
         config: Optional[Config] = None,
         model_override: Optional[str] = None,
+        routing_mode: str = "sub_agents",
     ):
         """Initialize the specialist agent factory.
         
@@ -39,10 +40,12 @@ class SpecialistAgentFactory:
             server_configs: List of server configuration dictionaries
             config: Optional Config instance for model configuration
             model_override: Optional model name to override default
+            routing_mode: Specialist routing mode ('sub_agents' or 'tools').
         """
         self.server_configs = server_configs
         self.config = config or Config()
         self.model_override = model_override
+        self.routing_mode = routing_mode
         self._agents: Dict[str, Agent] = {}
         self._available_servers: List[str] = []
     
@@ -86,6 +89,7 @@ class SpecialistAgentFactory:
                 available_servers=server_names,
                 config=self.config,
                 model_override=self.model_override,
+                routing_mode=self.routing_mode,
             )
             
             if agent is not None:
@@ -126,6 +130,7 @@ class SpecialistAgentFactory:
                 available_servers=server_names,
                 config=self.config,
                 model_override=self.model_override,
+                routing_mode=self.routing_mode,
             )
             
             if agent is not None:

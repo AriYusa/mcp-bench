@@ -10,7 +10,9 @@ import asyncio
 import inspect
 import json
 import logging
+import string
 import time
+from collections import defaultdict, deque
 from typing import Dict, List, Any, Optional
 
 from google.adk.runners import InMemoryRunner
@@ -24,6 +26,7 @@ from google.genai import types
 from langfuse import get_client
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.tools.mcp_tool.mcp_tool import McpTool
+from google.adk.tools.agent_tool import AgentTool
 
 from .config import Config
 from .content_compression import ContentCompressor
@@ -111,6 +114,157 @@ class CountInvocationPlugin(BasePlugin):
     ) -> None:
         self.llm_request_count += 1
 
+
+# ---------------------------------------------------------------------------
+# Inner tool call tracking for "tools" routing mode
+# ---------------------------------------------------------------------------
+
+class InnerToolCallTracker:
+    """Tracks MCP tool calls made by specialist agents when running in 'tools' mode.
+
+    Each specialist runs inside an AgentTool sub-runner.  Agent-level callbacks
+    on the specialist write to this shared tracker so the executor can later
+    attach the inner calls to the corresponding agent-tool execution result.
+
+    Two-phase design:
+
+    1. *register_coordinator_call(agent_name, call_id)* — called from
+       ``_track_tool_call`` as soon as the coordinator issues an agent-tool
+       function_call.  Queues the coordinator ``call_id`` per agent_name (FIFO).
+
+    2. *register_invocation(agent_name, invocation_id)* — called from
+       ``before_agent_callback`` when the specialist actually starts.  Claims
+       the next pending ``call_id`` for that agent (FIFO by start order, which
+       matches issue order) and stores ``call_id → invocation_id``.
+
+    3. *pop_calls(agent_name, call_id)* — called from ``_track_tool_response``
+       using the coordinator ``call_id`` (== ``response_id``).  Looks up the
+       specialist ``invocation_id`` directly, so completion order does not
+       matter — parallel runs that finish out of order are always attributed
+       to the correct outer tool call.
+    """
+
+    def __init__(self) -> None:
+        # sub_round counter per invocation_id
+        self._sub_rounds: Dict[str, int] = {}
+        # collected inner tool call dicts per invocation_id
+        self._calls: Dict[str, List[Dict[str, Any]]] = {}
+        # FIFO of coordinator call_ids per agent_name (issue order)
+        self._pending_call_ids: Dict[str, deque] = {}
+        # coordinator call_id → specialist invocation_id (set at start time)
+        self._call_id_to_invocation: Dict[str, str] = {}
+
+    def register_coordinator_call(self, agent_name: str, call_id: str) -> None:
+        """Called from _track_tool_call when the coordinator issues an agent-tool call."""
+        self._pending_call_ids.setdefault(agent_name, deque()).append(call_id)
+        logger.debug(f"[InnerTracker] pending coordinator call {call_id} for {agent_name}")
+
+    def register_invocation(self, agent_name: str, invocation_id: str) -> None:
+        """Called from before_agent_callback: links the next pending call_id to this invocation."""
+        if invocation_id in self._calls:
+            return  # already registered (guard against duplicate before_agent_callback)
+        self._sub_rounds[invocation_id] = 0
+        self._calls[invocation_id] = []
+        pending = self._pending_call_ids.get(agent_name)
+        if pending:
+            call_id = pending.popleft()
+            self._call_id_to_invocation[call_id] = invocation_id
+            logger.debug(f"[InnerTracker] linked call_id={call_id} → invocation={invocation_id} for {agent_name}")
+        else:
+            logger.warning(f"[InnerTracker] register_invocation: no pending call_id for {agent_name}")
+
+    def increment_sub_round(self, invocation_id: str) -> int:
+        """Increment and return the sub-round counter for *invocation_id*."""
+        self._sub_rounds[invocation_id] = self._sub_rounds.get(invocation_id, 0) + 1
+        return self._sub_rounds[invocation_id]
+
+    def current_sub_round(self, invocation_id: str) -> int:
+        return self._sub_rounds.get(invocation_id, 0)
+
+    def record_tool_call(self, invocation_id: str, entry: Dict[str, Any]) -> None:
+        if invocation_id in self._calls:
+            self._calls[invocation_id].append(entry)
+        else:
+            logger.warning(f"[InnerTracker] record_tool_call: unknown invocation_id {invocation_id}")
+
+    def pop_calls(self, agent_name: str, call_id: Optional[str]) -> List[Dict[str, Any]]:
+        """Return and clear inner calls for the coordinator *call_id*.
+
+        Keyed by coordinator call_id so completions can arrive in any order.
+        Falls back to the oldest pending invocation if call_id is unavailable.
+        """
+        invocation_id = self._call_id_to_invocation.pop(call_id, None) if call_id else None
+        if invocation_id is None:
+            # Fallback: should not normally happen, but drain the oldest entry
+            logger.warning(f"[InnerTracker] pop_calls: no invocation for call_id={call_id}, falling back")
+            for inv_id in list(self._calls):
+                calls = self._calls.pop(inv_id, [])
+                self._sub_rounds.pop(inv_id, None)
+                return calls
+            return []
+        calls = self._calls.pop(invocation_id, [])
+        self._sub_rounds.pop(invocation_id, None)
+        return calls
+
+
+def _make_specialist_before_agent_cb(tracker: InnerToolCallTracker):
+    """Factory: returns a before_agent_callback that registers the invocation_id."""
+    async def _before_agent_cb(callback_context: CallbackContext) -> None:
+        agent_name = callback_context.agent_name
+        invocation_id = callback_context.invocation_id
+        tracker.register_invocation(agent_name, invocation_id)
+        return None
+    return _before_agent_cb
+
+
+def _make_specialist_after_model_cb(tracker: InnerToolCallTracker):
+    """Factory: returns an after_model_callback that increments the specialist sub-round."""
+    async def _after_model_cb(callback_context: CallbackContext, llm_response):
+        invocation_id = callback_context.invocation_id
+        sr = tracker.increment_sub_round(invocation_id)
+        logger.debug(f"[InnerTracker] {callback_context.agent_name} invocation={invocation_id} sub_round → {sr}")
+        return None  # do not modify the response
+    return _after_model_cb
+
+
+def _make_specialist_after_tool_cb(
+    tracker: InnerToolCallTracker,
+    extract_server_fn,
+):
+    """Factory: returns an after_tool_callback that records each MCP tool call."""
+    async def _after_tool_cb(tool, args, tool_context, tool_response):
+        invocation_id = tool_context.invocation_id
+        agent_name = tool_context.agent_name
+        tool_name = getattr(tool, 'name', str(tool))
+        call_id = getattr(tool_context, 'function_call_id', None)
+        server_name, _ = extract_server_fn(tool_name)
+
+        is_success = True
+        if isinstance(tool_response, dict):
+            if tool_response.get('isError') or tool_response.get('error') or tool_response.get('exception'):
+                is_success = False
+
+        entry = {
+            "type": "tool_execution",
+            "tool": tool_name,
+            "call_id": call_id,
+            "server": server_name,
+            "sub_round": tracker.current_sub_round(invocation_id),
+            "parameters": args,
+            "timestamp": time.time(),
+            "success": is_success,
+            "response": tool_response,
+            "compressed": False,
+        }
+        if not is_success:
+            entry["error"] = str(tool_response)
+
+        tracker.record_tool_call(invocation_id, entry)
+        logger.debug(f"[InnerTracker] {agent_name} invocation={invocation_id} → {tool_name} (sub_round={entry['sub_round']})")
+        return None  # do not modify the response
+    return _after_tool_cb
+
+
 class ADKTaskExecutor:
     """Multi-agent task executor using Google ADK.
     
@@ -183,6 +337,13 @@ class ADKTaskExecutor:
         self._server_prefix_map = self._build_server_prefix_map(server_configs)
         self.tools_of_required_servers = {}  # To store tools from required servers for evals
         
+        # Routing mode controls whether specialists are sub_agents or AgentTools
+        self.routing_mode = adk_config_loader.get_agent_routing_mode()
+        # Populated during setup: maps agent-tool name -> specialist Agent (tools mode only)
+        self._agent_tool_map: Dict[str, Any] = {}
+        # Inner tool call tracker for tools mode (populated in setup)
+        self._inner_tracker: Optional[InnerToolCallTracker] = None
+        
         # Planning compliance tracking
         self._total_planned_tools = 0
         self._valid_planned_tools = 0
@@ -242,6 +403,23 @@ class ADKTaskExecutor:
         
         self.coordinator = self.orchestrator.initialize(server_names)
 
+        # In tools mode, attach callbacks to each specialist agent so that
+        # inner MCP tool calls are captured in execution_results.
+        if self.routing_mode == "tools":
+            self._inner_tracker = InnerToolCallTracker()
+            before_agent_cb = _make_specialist_before_agent_cb(self._inner_tracker)
+            after_model_cb = _make_specialist_after_model_cb(self._inner_tracker)
+            after_tool_cb = _make_specialist_after_tool_cb(
+                self._inner_tracker,
+                self._extract_server_and_base_tool,
+            )
+            for t in (self.coordinator.tools or []):
+                if isinstance(t, AgentTool):
+                    t.agent.before_agent_callback = before_agent_cb
+                    t.agent.after_model_callback = after_model_cb
+                    t.agent.after_tool_callback = after_tool_cb
+                    logger.debug(f"Attached inner-tracking callbacks to specialist '{t.agent.name}'")
+
         # Eagerly preload MCP toolsets so MCP connections are established
         # during initialization instead of first user query execution.
         await self._preload_mcp_toolsets()
@@ -260,10 +438,20 @@ class ADKTaskExecutor:
         logger.info("ADK multi-agent system setup complete")
 
     def iter_agents(self, agent):
-        """Yields all agents in the tree (depth-first)."""
+        """Yields all agents in the tree (depth-first).
+
+        Works for both routing modes:
+        - sub_agents mode: recurses through agent.sub_agents
+        - tools mode: recurses into the .agent of each AgentTool in agent.tools
+        """
         yield agent
-        for sub in agent.sub_agents:
+        # sub_agents path
+        for sub in (agent.sub_agents or []):
             yield from self.iter_agents(sub)
+        # tools path: recurse into AgentTool-wrapped agents
+        for tool in (agent.tools or []):
+            if isinstance(tool, AgentTool):
+                yield from self.iter_agents(tool.agent)
 
     def _collect_agent_hierarchy(self) -> List[LlmAgent]:
 
@@ -316,9 +504,40 @@ class ADKTaskExecutor:
             "agent": agent_name,
         }
         self.tools_of_required_servers = tools_of_required_servers
-        print("Tools allowed:")
-        for tool_name, tool_info in tools_of_required_servers.items():
-            print(f"- {tool_name} (server: {tool_info['server']}, agent: {tool_info['agent']})")
+
+        # ------------------------------------------------------------------ #
+        # Inject routing-mechanism pseudo-tool so the evaluator never penalises
+        # tool calls that are part of the routing infrastructure.
+        # ------------------------------------------------------------------ #
+        if self.routing_mode == "tools":
+            # In tools mode the coordinator calls specialist agents by name
+            # (e.g., "ResearcherAgent").  Register each agent-tool so the
+            # evaluator recognises those names as valid.
+            for tool in (self.coordinator.tools or []):
+                if isinstance(tool, AgentTool):
+                    agent_name = tool.agent.name
+                    self._agent_tool_map[agent_name] = tool.agent
+                    tools_of_required_servers[agent_name] = {
+                        "name": agent_name,
+                        "original_name": agent_name,
+                        "server": "adk_agent_tool",
+                        "description": tool.agent.description,
+                        "input_schema": {"request": "string"},
+                        "agent": "coordinator",
+                    }
+        else:
+            # sub_agents mode: ADK emits transfer_to_agent function calls
+            tool_name = "transfer_to_agent"
+            tools_of_required_servers[tool_name] = {
+                "name": tool_name,
+                "original_name": tool_name,
+                "server": "adk_internal",
+                "description": "Switch control to other agent",
+                "input_schema": {"agent_name": "string"},
+                "agent": agent_name,
+            }
+
+        self.tools_of_required_servers = tools_of_required_servers
         
     async def execute(self, task: str) -> Dict[str, Any]:
         """Execute a task using the multi-agent system.
@@ -368,6 +587,14 @@ class ADKTaskExecutor:
         final_response = ""
         events_collected = []
         
+        # In tools mode, track coordinator rounds sequentially.
+        # A new coordinator round starts each time the coordinator LLM
+        # produces function_call(s) after we've seen responses for the
+        # previous batch.
+        _coordinator_round = 0
+        _need_new_round = True  # start a new round on first function_call
+        _is_tools_mode = self.routing_mode == "tools"
+        
         try:
             # Create user message
             user_content = types.Content(
@@ -396,10 +623,19 @@ class ADKTaskExecutor:
                         
                         # Track tool calls
                         if hasattr(part, 'function_call') and part.function_call:
-                            self._track_tool_call(part.function_call, round_count=self.count_invocation_plugin.llm_request_count) 
+                            if _is_tools_mode:
+                                # Coordinator round: bump on first call after responses
+                                if _need_new_round:
+                                    _coordinator_round += 1
+                                    _need_new_round = False
+                                self._track_tool_call(part.function_call, round_count=_coordinator_round)
+                            else:
+                                self._track_tool_call(part.function_call, round_count=self.count_invocation_plugin.llm_request_count) 
                         
                         if hasattr(part, 'function_response') and part.function_response:
                             self._track_tool_response(part.function_response)
+                            if _is_tools_mode:
+                                _need_new_round = True
             
         except Exception as e:
             logger.error(f"Error during ADK execution: {e}")
@@ -409,6 +645,10 @@ class ADKTaskExecutor:
         
         elapsed_time = time.time() - start_time
         logger.info(f"ADK execution completed in {elapsed_time:.2f}s with {self.count_invocation_plugin.llm_request_count} events")
+
+        # Post-process: assign thread labels for parallel agent-tool calls
+        if _is_tools_mode:
+            self._assign_thread_labels()
 
         # Add tokens consumed by ContentCompressor LLM calls to the totals
         compressor_stats = self.context_compressor_plugin.get_stats()
@@ -478,6 +718,17 @@ class ADKTaskExecutor:
         call_id = getattr(function_call, 'id', None)
         server_name, _ = self._extract_server_and_base_tool(tool_name)
         
+        # In tools mode the coordinator calls specialist agents by their
+        # ADK name, which won't match any server prefix.  Fall back to the
+        # "adk_agent_tool" pseudo-server so tracking is consistent.
+        if not server_name and tool_name in self._agent_tool_map:
+            server_name = "adk_agent_tool"
+        
+        # In tools mode, register the coordinator call_id so before_agent_callback
+        # can link it to the specialist's invocation_id.
+        if self._inner_tracker and tool_name in self._agent_tool_map:
+            self._inner_tracker.register_coordinator_call(tool_name, call_id)
+
         self.execution_results.append({
             "type": "tool_call",
             "tool": tool_name,
@@ -544,6 +795,11 @@ class ADKTaskExecutor:
                 )
             else:
                 result["compressed"] = False
+            # In tools mode, attach inner specialist tool calls.
+            # Pass response_id (== coordinator call_id) so that completion order
+            # does not affect attribution.
+            if self._inner_tracker and tool_name in self._agent_tool_map:
+                result["inner_tool_calls"] = self._inner_tracker.pop_calls(tool_name, response_id)
             break
         else:
             raise ValueError(f"No matching tool call found for response: {tool_name}")
@@ -552,6 +808,33 @@ class ADKTaskExecutor:
             f"Tool response: {tool_name} (success={is_success}"
             + (f", compressed {compression_info['tokens_before']}→{compression_info['tokens_after']} tokens)" if compression_info else ")")
         )
+
+    def _assign_thread_labels(self) -> None:
+        """Assign thread labels for parallel agent-tool calls in the same coordinator round.
+
+        For each coordinator round that contains multiple agent-tool entries,
+        assigns ``thread`` = "a", "b", "c", … in appearance order.  Rounds with
+        a single agent-tool call (or non-agent-tool entries) get ``thread = None``.
+        """
+        # Group agent-tool indices by round
+        round_indices: Dict[int, List[int]] = defaultdict(list)
+        for idx, entry in enumerate(self.execution_results):
+            if entry.get("server") == "adk_agent_tool":
+                round_indices[entry["round"]].append(idx)
+
+        labels = list(string.ascii_lowercase)  # a-z
+
+        for round_num, indices in round_indices.items():
+            if len(indices) > 1:
+                for i, idx in enumerate(indices):
+                    self.execution_results[idx]["thread"] = labels[i] if i < len(labels) else str(i)
+            else:
+                self.execution_results[indices[0]]["thread"] = None
+
+        # Non-agent-tool entries don't get a thread label
+        for entry in self.execution_results:
+            if "thread" not in entry:
+                entry["thread"] = None
     
     def _serialize_state(self, state) -> str:
         """Serialize session state to string format.
@@ -629,6 +912,24 @@ class ADKTaskExecutor:
                                 await session_mgr.cleanup()
                         except Exception as e:
                             logger.warning(f"Error closing MCP session for agent '{agent_name}': {e}")
+            
+            # In tools mode, also clean up the MCP toolsets inside AgentTool
+            # inner agents (they are not in coordinator.sub_agents).
+            if self.routing_mode == "tools" and self.coordinator:
+                for t in (self.coordinator.tools or []):
+                    if isinstance(t, AgentTool):
+                        inner_agent = t.agent
+                        inner_name = getattr(inner_agent, "name", "unknown")
+                        for inner_tool in (getattr(inner_agent, "tools", None) or []):
+                            if hasattr(inner_tool, "_session_manager"):
+                                try:
+                                    sm = inner_tool._session_manager
+                                    if hasattr(sm, "close"):
+                                        await sm.close()
+                                    elif hasattr(sm, "cleanup"):
+                                        await sm.cleanup()
+                                except Exception as e:
+                                    logger.warning(f"Error closing MCP session inside AgentTool '{inner_name}': {e}")
             
             # Clear references
             self.coordinator = None

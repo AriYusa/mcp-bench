@@ -28,6 +28,7 @@ from langfuse import get_client
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from google_adk_agents.adk_executor import ADKTaskExecutor
+from google_adk_agents.agent_mcp_mapping import AGENT_CONFIGS, get_agents_for_servers
 from benchmark.evaluator import TaskEvaluator
 from benchmark.results_aggregator import ResultsAggregator
 from utils.local_server_config import LocalServerConfigLoader
@@ -550,7 +551,10 @@ class ADKBenchmarkRunner:
         The prefixing convention mirrors ``mcp_tools.create_toolset_for_server``:
         ``<server_name_lowercased_and_underscored>_<tool_name>``.
 
-        ``transfer_to_agent`` (ADK internal routing) is always included.
+        Routing pseudo-tool injection is mode-dependent:
+        - ``sub_agents``: injects ``transfer_to_agent`` (ADK built-in routing)
+        - ``tools``:      injects one entry per specialist agent that handles
+                          the required servers (named by their ADK agent name)
 
         Args:
             required_servers: List of server names the task requires.
@@ -589,15 +593,39 @@ class ADKBenchmarkRunner:
                 f"Catalog: added {len(tools)} tools from '{server_name}' (prefix: '{prefix}')"
             )
 
-        # Always include the ADK-internal routing tool
-        available_tools['transfer_to_agent'] = {
-            'name': 'transfer_to_agent',
-            'original_name': 'transfer_to_agent',
-            'server': 'adk_internal',
-            'description': 'Switch control to other agent',
-            'input_schema': {'agent_name': 'string'},
-            'agent': 'coordinator',
-        }
+        routing_mode = adk_config_loader.get_agent_routing_mode()
+
+        if routing_mode == "tools":
+            # In tools mode the coordinator calls specialist agents by name.
+            # Inject one entry per specialist that is relevant to the required
+            # servers so the evaluator counts those calls as valid.
+            agent_keys = get_agents_for_servers(required_servers)
+            for agent_key in agent_keys:
+                agent_cfg = AGENT_CONFIGS.get(agent_key)
+                if agent_cfg is None:
+                    continue
+                available_tools[agent_cfg.name] = {
+                    'name': agent_cfg.name,
+                    'original_name': agent_cfg.name,
+                    'server': 'adk_agent_tool',
+                    'description': agent_cfg.description,
+                    'input_schema': {'request': 'string'},
+                    'agent': 'coordinator',
+                }
+            logger.debug(
+                f"Catalog: injected {len(agent_keys)} agent-tool entries for required servers "
+                f"(routing_mode='tools')"
+            )
+        else:
+            # sub_agents mode: ADK emits transfer_to_agent function calls
+            available_tools['transfer_to_agent'] = {
+                'name': 'transfer_to_agent',
+                'original_name': 'transfer_to_agent',
+                'server': 'adk_internal',
+                'description': 'Switch control to other agent',
+                'input_schema': {'agent_name': 'string'},
+                'agent': 'coordinator',
+            }
 
         return available_tools
 
@@ -864,6 +892,8 @@ class ADKBenchmarkRunner:
             'task_timeout': adk_config_loader.get_task_timeout(),
             'max_retries': adk_config_loader.get_max_retries(),
             'retry_delay': adk_config_loader.get_retry_delay(),
+            # --- Agent architecture ---
+            'agent_routing_mode': adk_config_loader.get_agent_routing_mode(),
             # --- Benchmark feature flags ---
             'use_fuzzy_descriptions': self.use_fuzzy_descriptions,
             'enable_concrete_description_ref': self.enable_concrete_description_ref,
