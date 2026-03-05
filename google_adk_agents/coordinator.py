@@ -9,15 +9,17 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from google.adk import Agent
+from google.adk.tools.agent_tool import AgentTool
 
 from .config import Config
 from .agent_mcp_mapping import COORDINATOR_CONFIG, AGENT_CONFIGS
 from .specialists import SpecialistAgentFactory
+from . import adk_config_loader
 
 logger = logging.getLogger(__name__)
 
 
-def build_coordinator_instruction(specialist_agents: Dict[str, Agent]) -> str:
+def build_coordinator_instruction(specialist_agents: Dict[str, Agent], routing_mode: str = "sub_agents") -> str:
     """Build dynamic instruction for coordinator based on available specialists.
     
     Args:
@@ -26,7 +28,21 @@ def build_coordinator_instruction(specialist_agents: Dict[str, Agent]) -> str:
     Returns:
         Formatted instruction string for the coordinator
     """
-    base_instruction = """You are the Coordinator agent, responsible for understanding user requests and routing them to the appropriate specialist agents.
+    if routing_mode == "tools":
+        routing_rule = (
+            "- Always delegate to specialists rather than answering directly\n"
+            "- For multi-domain requests, you can call several specialists at the same time, if their sub-tasks are independent\n"
+            "- For several subtasks of the same domain that can be handled by the same specialist, call that specialist once with all relevant subtasks\n"
+            "- Once all needed information is gathered, synthesize the final answer"
+        )
+    else:
+        routing_rule = (
+            "- Always delegate to specialists rather than answering directly\n"
+            "- For complex requests spanning multiple domains, you might need several specialists\n"
+            "- Once all needed information is gathered, synthesize the final answer"
+        )
+
+    base_instruction = f"""You are the Coordinator agent, responsible for understanding user requests and routing them to the appropriate specialist agents.
 
 Your primary role is to:
 1. Analyze the user's request to understand the domain(s) involved
@@ -35,11 +51,7 @@ Your primary role is to:
 4. Synthesize final responses when multiple agents contribute
 
 IMPORTANT ROUTING RULES:
-- Always delegate to specialists rather than answering directly
-- You do NOT have direct access to any tools - only specialists have tools
-- For complex requests spanning multiple domains, route to one specialist at a time
-- Wait for each specialist's response before routing to the next
-- Once all needed information is gathered, synthesize the final answer"""
+{routing_rule}"""
 
     # Build specialist descriptions
     specialist_lines = ["\n\nAVAILABLE SPECIALIST AGENTS:"]
@@ -53,7 +65,7 @@ IMPORTANT ROUTING RULES:
     
     specialist_section = "\n".join(specialist_lines)
     
-    routing_guidance = """
+    routing_guidance = f"""
 
 ROUTING GUIDANCE BY DOMAIN:
 - Academic/Research/NASA/Museums/Wikipedia → ResearcherAgent
@@ -74,29 +86,39 @@ def create_coordinator_agent(
     config: Optional[Config] = None,
     model_override: Optional[str] = None,
     server_names: Optional[List[str]] = None,
+    routing_mode: Optional[str] = None,
 ) -> Agent:
-    """Create the coordinator agent with its specialist sub-agents.
+    """Create the coordinator agent with its specialist sub-agents or agent-tools.
     
     This function creates the complete multi-agent hierarchy:
     - Coordinator (parent) - routes requests to specialists
-    - Specialist agents (sub-agents) - each with domain-specific MCP tools
+    - Specialist agents with domain-specific MCP tools, wired as either:
+        sub_agents: classic ADK routing via transfer_to_agent
+        tools:      each specialist wrapped with AgentTool, called directly
     
     Args:
         server_configs: List of server configuration dictionaries
         config: Optional Config instance for model configuration
         model_override: Optional model name to override default
         server_names: Optional list of available server names
+        routing_mode: Override for agent routing mode ('sub_agents' or 'tools').
+            Defaults to the value in adk_benchmark_config.yaml.
         
     Returns:
-        Configured coordinator Agent with specialist sub-agents
+        Configured coordinator Agent
     """
     config = config or Config()
+    if routing_mode is None:
+        routing_mode = adk_config_loader.get_agent_routing_mode()
+    
+    logger.info(f"Building coordinator with routing_mode='{routing_mode}'")
     
     # Create specialist agents factory
     factory = SpecialistAgentFactory(
         server_configs=server_configs,
         config=config,
         model_override=model_override,
+        routing_mode=routing_mode,
     )
     
     # Create all relevant specialist agents
@@ -105,27 +127,40 @@ def create_coordinator_agent(
     if not specialist_agents:
         logger.warning("No specialist agents created. Coordinator will have no sub-agents.")
     
-    # Build dynamic instruction based on available specialists
-    coordinator_instruction = build_coordinator_instruction(specialist_agents)
+    # Build dynamic instruction based on available specialists and routing mode
+    coordinator_instruction = build_coordinator_instruction(specialist_agents, routing_mode)
     
-    # Get list of specialist agents for sub_agents parameter
-    sub_agents = factory.get_agents_list()
-    
-    # Create the coordinator agent
-    coordinator = Agent(
-        name=COORDINATOR_CONFIG.name,
-        model=config.get_model_for_agent(model_override),
-        description=COORDINATOR_CONFIG.description,
-        instruction=coordinator_instruction,
-        sub_agents=sub_agents,
-        # Coordinator doesn't have direct tools - only routes to specialists
-        tools=[],
-    )
-    
-    logger.info(
-        f"Created coordinator agent '{COORDINATOR_CONFIG.name}' with "
-        f"{len(sub_agents)} specialist sub-agents"
-    )
+    if routing_mode == "tools":
+        # Wrap each specialist as an AgentTool so the coordinator calls it
+        # as a regular function-call tool instead of transferring to it.
+        agent_tools = [AgentTool(agent=specialist) for specialist in factory.get_agents_list()]
+        coordinator = Agent(
+            name=COORDINATOR_CONFIG.name,
+            model=config.get_model_for_agent(model_override),
+            description=COORDINATOR_CONFIG.description,
+            instruction=coordinator_instruction,
+            tools=agent_tools,
+            sub_agents=[],
+        )
+        logger.info(
+            f"Created coordinator agent '{COORDINATOR_CONFIG.name}' with "
+            f"{len(agent_tools)} specialist agent-tools (routing_mode='tools')"
+        )
+    else:
+        # sub_agents mode: classic ADK sub-agent transfer
+        sub_agents = factory.get_agents_list()
+        coordinator = Agent(
+            name=COORDINATOR_CONFIG.name,
+            model=config.get_model_for_agent(model_override),
+            description=COORDINATOR_CONFIG.description,
+            instruction=coordinator_instruction,
+            sub_agents=sub_agents,
+            tools=[],
+        )
+        logger.info(
+            f"Created coordinator agent '{COORDINATOR_CONFIG.name}' with "
+            f"{len(sub_agents)} specialist sub-agents (routing_mode='sub_agents')"
+        )
     
     # Log agent hierarchy
     agent_summary = factory.get_agent_server_summary()
@@ -147,6 +182,7 @@ class MultiAgentOrchestrator:
         server_configs: List[Dict[str, Any]],
         config: Optional[Config] = None,
         model_override: Optional[str] = None,
+        routing_mode: Optional[str] = None,
     ):
         """Initialize the multi-agent orchestrator.
         
@@ -154,10 +190,13 @@ class MultiAgentOrchestrator:
             server_configs: List of server configuration dictionaries
             config: Optional Config instance for model configuration
             model_override: Optional model name to override default
+            routing_mode: Override for specialist routing mode.
+                Defaults to adk_benchmark_config.yaml value.
         """
         self.server_configs = server_configs
         self.config = config or Config()
         self.model_override = model_override
+        self.routing_mode = routing_mode or adk_config_loader.get_agent_routing_mode()
         self.coordinator: Optional[Agent] = None
         self._factory: Optional[SpecialistAgentFactory] = None
     
@@ -175,6 +214,7 @@ class MultiAgentOrchestrator:
             config=self.config,
             model_override=self.model_override,
             server_names=server_names,
+            routing_mode=self.routing_mode,
         )
         
         return self.coordinator
@@ -198,17 +238,33 @@ class MultiAgentOrchestrator:
         
         info = {
             "coordinator": self.coordinator.name,
-            "specialist_count": len(self.coordinator.sub_agents) if self.coordinator.sub_agents else 0,
-            "specialists": []
+            "routing_mode": self.routing_mode,
         }
-        
-        if self.coordinator.sub_agents:
-            for agent in self.coordinator.sub_agents:
-                specialist_info = {
-                    "name": agent.name,
-                    "description": agent.description,
-                    "tool_count": len(agent.tools) if agent.tools else 0,
+
+        if self.routing_mode == "tools":
+            # Specialists are stored as AgentTool objects in coordinator.tools
+            agent_tools = [
+                t for t in (self.coordinator.tools or [])
+                if isinstance(t, AgentTool)
+            ]
+            info["specialist_count"] = len(agent_tools)
+            info["specialists"] = [
+                {
+                    "name": at.agent.name,
+                    "description": at.agent.description,
+                    "tool_count": len(at.agent.tools) if at.agent.tools else 0,
                 }
-                info["specialists"].append(specialist_info)
+                for at in agent_tools
+            ]
+        else:
+            info["specialist_count"] = len(self.coordinator.sub_agents) if self.coordinator.sub_agents else 0
+            info["specialists"] = []
+            if self.coordinator.sub_agents:
+                for agent in self.coordinator.sub_agents:
+                    info["specialists"].append({
+                        "name": agent.name,
+                        "description": agent.description,
+                        "tool_count": len(agent.tools) if agent.tools else 0,
+                    })
         
         return info

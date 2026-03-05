@@ -49,6 +49,13 @@ adk_execution:
   # true – avoids first-query latency and surface connection errors early)
   preload_mcp_toolsets: true
 
+  # How specialist agents are wired to the coordinator:
+  #   "sub_agents" – classic ADK routing via transfer_to_agent (built-in)
+  #   "tools"      – each specialist is wrapped with AgentTool and placed in
+  #                  the coordinator's tools list; the coordinator calls them
+  #                  as regular function-call tools instead of transferring
+  agent_routing_mode: "tools"
+
 adk_mcp:
   # Add server name as prefix to each tool name to ensure uniqueness across agents
   add_server_prefix: true

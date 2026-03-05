@@ -22,6 +22,7 @@ def create_specialist_agent(
     available_servers: List[str],
     config: Optional[Config] = None,
     model_override: Optional[str] = None,
+    routing_mode: str = "sub_agents",
 ) -> Optional[Agent]:
     """Create a specialist agent with its assigned MCP tools.
     
@@ -34,6 +35,12 @@ def create_specialist_agent(
         available_servers: List of currently available MCP server names
         config: Optional Config instance for model configuration
         model_override: Optional model name to override default
+        routing_mode: How the coordinator routes to specialists.
+            "sub_agents" - classic ADK sub-agent transfer (uses
+            disallow_transfer_to_parent/peers flags).
+            "tools" - specialist wrapped as AgentTool; transfer flags are
+            omitted because the specialist runs in isolation via the tool
+            invocation mechanism and cannot transfer anyway.
         
     Returns:
         Configured ADK Agent instance, or None if no tools are available
@@ -71,20 +78,31 @@ TOOL CALL LIMIT (CRITICAL CONSTRAINT):
     constrained_instruction = agent_config.instruction + tool_limit_note
 
     # Create the ADK agent
-    agent = Agent(
-        name=agent_config.name,
-        model=config.get_model_for_agent(model_override),
-        description=agent_config.description,
-        instruction=constrained_instruction,
-        tools=toolsets,  # Pass McpToolset instances
-        # Allow transfer to parent (coordinator) and peers (other specialists)
-        disallow_transfer_to_parent=False,
-        disallow_transfer_to_peers=True,
-    )
+    if routing_mode == "tools":
+        # When wrapped as AgentTool the specialist runs in its own sub-runner
+        # and cannot transfer to parent or peers — omit transfer-related flags.
+        agent = Agent(
+            name=agent_config.name,
+            model=config.get_model_for_agent(model_override),
+            description=agent_config.description,
+            instruction=constrained_instruction,
+            tools=toolsets,
+        )
+    else:
+        # sub_agents mode: allow returning to coordinator, block peer transfers
+        agent = Agent(
+            name=agent_config.name,
+            model=config.get_model_for_agent(model_override),
+            description=agent_config.description,
+            instruction=constrained_instruction,
+            tools=toolsets,
+            disallow_transfer_to_parent=False,
+            disallow_transfer_to_peers=True,
+        )
     
     logger.info(
         f"Created specialist agent '{agent_config.name}' with {len(toolsets)} toolsets "
-        f"from {len(agent_servers)} servers: {agent_servers}"
+        f"from {len(agent_servers)} servers: {agent_servers} (routing_mode={routing_mode})"
     )
     
     return agent

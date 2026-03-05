@@ -35,7 +35,7 @@ When answering questions:
 1. Use the most appropriate tools from your available set
 2. Cross-reference information when possible
 3. Cite sources and provide context
-4. If you need information outside your domain, transfer to the appropriate specialist agent.""",
+4. If you need information outside your domain, transfer to the appropriate specialist agent or transfer back to the coordinator agent for routing.""",
         mcp_servers=[
             "Call for Papers",     # Conference tracking
             "Paper Search",        # Academic research
@@ -59,7 +59,7 @@ When answering questions:
 1. Prioritize accuracy for health-related information
 2. Use appropriate medical calculators when needed
 3. Provide nutritional context when relevant
-4. If you need information outside your domain, transfer to the appropriate specialist agent.
+4. If you need information outside your domain, transfer to the appropriate specialist agent or transfer back to the coordinator agent for routing.
 
 IMPORTANT: Always clarify that medical information is for educational purposes and not a substitute for professional medical advice.""",
         mcp_servers=[
@@ -85,7 +85,7 @@ When answering questions:
 1. Use precise mathematical notation when appropriate
 2. Show step-by-step calculations for complex problems
 3. Convert units accurately with proper precision
-4. If you need information outside your domain, transfer to the appropriate specialist agent.""",
+4. If you need information outside your domain, transfer to the appropriate specialist agent or transfer back to the coordinator agent for routing.""",
         mcp_servers=[
             "Math MCP",            # Advanced calculations
             "Scientific Computing", # Scientific computation (scientific_computation_mcp)
@@ -137,7 +137,7 @@ When answering questions:
 1. Provide practical, actionable information
 2. Consider user preferences and context
 3. Include relevant location-based details
-4. If you need information outside your domain, transfer to the appropriate specialist agent.""",
+4. If you need information outside your domain, transfer to the appropriate specialist agent or transfer back to the coordinator agent for routing.""",
         mcp_servers=[
             "Google Maps",         # Navigation and geocoding (mcp-google-map)
             "Weather Data",        # Forecasts (weather_mcp)
@@ -161,7 +161,7 @@ When answering questions:
 1. Apply specialized knowledge appropriately
 2. Provide detailed technical information when needed
 3. Handle niche requests with appropriate expertise
-4. If you need information outside your domain, transfer to the appropriate specialist agent.""",
+4. If you need information outside your domain, transfer to the appropriate specialist agent or transfer back to the coordinator agent for routing.""",
         mcp_servers=[
             "OSINT Intelligence",  # Security and investigation (mcp-osint-server)
             "Huge Icons",          # Design and UI (hugeicons-mcp-server)

@@ -79,6 +79,16 @@ def get_max_llm_invocations() -> Optional[int]:
     return get("adk_execution.max_llm_invocations", None)
 
 
+def get_agent_routing_mode() -> str:
+    """Return the specialist routing mode: 'sub_agents' (default) or 'tools'."""
+    value = get("adk_execution.agent_routing_mode", "sub_agents")
+    if value not in ("sub_agents", "tools"):
+        raise ValueError(
+            f"Invalid agent_routing_mode '{value}'. Must be 'sub_agents' or 'tools'."
+        )
+    return value
+
+
 # ---------------------------------------------------------------------------
 # adk_models
 # ---------------------------------------------------------------------------
