@@ -153,6 +153,16 @@ class InnerToolCallTracker:
         self._pending_call_ids: Dict[str, deque] = {}
         # coordinator call_id → specialist invocation_id (set at start time)
         self._call_id_to_invocation: Dict[str, str] = {}
+        # Token accumulators for specialist LLM calls (not visible in outer event stream)
+        self.specialist_prompt_tokens: int = 0
+        self.specialist_output_tokens: int = 0
+        self.specialist_total_tokens: int = 0
+
+    def reset_tokens(self) -> None:
+        """Reset specialist token accumulators (called at the start of each execute())."""
+        self.specialist_prompt_tokens = 0
+        self.specialist_output_tokens = 0
+        self.specialist_total_tokens = 0
 
     def register_coordinator_call(self, agent_name: str, call_id: str) -> None:
         """Called from _track_tool_call when the coordinator issues an agent-tool call."""
@@ -218,11 +228,20 @@ def _make_specialist_before_agent_cb(tracker: InnerToolCallTracker):
 
 
 def _make_specialist_after_model_cb(tracker: InnerToolCallTracker):
-    """Factory: returns an after_model_callback that increments the specialist sub-round."""
+    """Factory: returns an after_model_callback that increments the specialist sub-round
+    and accumulates token usage from specialist LLM calls."""
     async def _after_model_cb(callback_context: CallbackContext, llm_response):
         invocation_id = callback_context.invocation_id
         sr = tracker.increment_sub_round(invocation_id)
         logger.debug(f"[InnerTracker] {callback_context.agent_name} invocation={invocation_id} sub_round → {sr}")
+        # Capture token usage — specialist events are not visible in the outer runner
+        # event stream, so we accumulate them here via the callback.
+        if llm_response is not None:
+            usage = getattr(llm_response, 'usage_metadata', None)
+            if usage is not None:
+                tracker.specialist_prompt_tokens += getattr(usage, 'prompt_token_count', 0) or 0
+                tracker.specialist_output_tokens += getattr(usage, 'candidates_token_count', 0) or 0
+                tracker.specialist_total_tokens += getattr(usage, 'total_token_count', 0) or 0
         return None  # do not modify the response
     return _after_model_cb
 
@@ -570,6 +589,9 @@ class ADKTaskExecutor:
         self.total_output_tokens = 0
         self.total_prompt_tokens = 0
         self.total_tokens = 0
+        # Reset specialist token accumulators for this task
+        if self._inner_tracker is not None:
+            self._inner_tracker.reset_tokens()
         # Reset compressor token counters for this task
         self.context_compressor_plugin.compression_prompt_tokens = 0
         self.context_compressor_plugin.compression_output_tokens = 0
@@ -649,6 +671,20 @@ class ADKTaskExecutor:
         # Post-process: assign thread labels for parallel agent-tool calls
         if _is_tools_mode:
             self._assign_thread_labels()
+
+        # Add tokens consumed by specialist agents (only visible via after_model_callback
+        # in tools routing mode, not in the outer event stream).
+        if self._inner_tracker is not None:
+            self.total_prompt_tokens += self._inner_tracker.specialist_prompt_tokens
+            self.total_output_tokens += self._inner_tracker.specialist_output_tokens
+            self.total_tokens += self._inner_tracker.specialist_total_tokens
+            if self._inner_tracker.specialist_total_tokens > 0:
+                logger.info(
+                    f"Specialist agent tokens included: "
+                    f"prompt={self._inner_tracker.specialist_prompt_tokens}, "
+                    f"output={self._inner_tracker.specialist_output_tokens}, "
+                    f"total={self._inner_tracker.specialist_total_tokens}"
+                )
 
         # Add tokens consumed by ContentCompressor LLM calls to the totals
         compressor_stats = self.context_compressor_plugin.get_stats()
