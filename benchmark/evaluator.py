@@ -1264,10 +1264,22 @@ class TaskEvaluator(BaseEvaluator):
         server_counts = Counter()
         
         for result in execution_results:
-            server = safe_get(result, 'server', '')
-            if server:
-                servers_used.add(server)
-                server_counts[server] += 1
+            inner_calls = result.get('inner_tool_calls')
+            if inner_calls is not None:
+                # Tools routing mode: the outer entry is an agent-tool wrapper.
+                # Count MCP servers from the actual inner tool calls made by the
+                # specialist, not the synthetic "adk_agent_tool" pseudo-server.
+                for inner in inner_calls:
+                    server = safe_get(inner, 'server', '')
+                    if server:
+                        servers_used.add(server)
+                        server_counts[server] += 1
+            else:
+                # Sub-agents mode or a plain MCP call: use the outer server field.
+                server = safe_get(result, 'server', '')
+                if server:
+                    servers_used.add(server)
+                    server_counts[server] += 1
         
         return {
             'server_count': len(servers_used),

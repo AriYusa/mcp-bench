@@ -89,7 +89,7 @@ TOOL CALL LIMIT (CRITICAL CONSTRAINT):
             tools=toolsets,
         )
     else:
-        # sub_agents mode: allow returning to coordinator, block peer transfers
+        # sub_agents mode: allow returning to coordinator and peer-to-peer specialist transfers
         agent = Agent(
             name=agent_config.name,
             model=config.get_model_for_agent(model_override),
@@ -97,7 +97,7 @@ TOOL CALL LIMIT (CRITICAL CONSTRAINT):
             instruction=constrained_instruction,
             tools=toolsets,
             disallow_transfer_to_parent=False,
-            disallow_transfer_to_peers=True,
+            disallow_transfer_to_peers=False,
         )
     
     logger.info(
