@@ -1,2 +1,54 @@
-- Simplify tools creation
-- Preload servers
+- [x] Preload servers Because that’s typically the first time the subagent’s McpToolset.get_tools() (or an MCP tool call) is actually invoked. ad this for all agents and subagens during init.
+- [x] add languse to lite llm
+- [x] check why langfuse trace is not included 2026-02-21 21:50:14,271 - langfuse - WARNING - Context error: No active span in current context. Operations that depend on an active span will be skipped. Ensure spans are created with start_as_current_span() or that you're operating within an active span context => added plaugin
+- [x] addjust evaluator to return stuctured output intead of jason (sincce some fikeds are missings and infulences aggregation)
+- [x] python run_benchmark.py --use-adk --models anthropic/claude-sonnet-4-6 --tasks-file tasks/test_task_multiple_agents.json
+- [x] run a view tasks together, and run a task a few times
+- [x] check definition of parallelism_efficiency, i think evaluatior assessed incorrectly.           "parallelism_efficiency_reasoning": "The task analysis noted all 14 primary conversions could be done in parallel via convert_batch in 1 call, and the 4 cross-validations for failed sensors could also be parallelized. The agent instead made 14 sequential individual conversion calls (massive inefficiency) + 4 sequential cross-validation calls. Parallelization opportunities: (1) 14 primary conversions could be 1 batch call = 13 redundant rounds, (2) 4 cross-validations could be parallel = 3 redundant rounds. Total: 16 redundant rounds out of 19 total rounds = 84% redundancy rate. However, all tools are on the same server, so the actual execution time impact may be minimal. From a pure efficiency standpoint: 0% of parallelizable tasks were executed in parallel (both primary conversions and cross-validations were sequential). Efficiency score based on >70% redundant calls AND 0% parallelization = 1-3 range.", => eval didnt know about called tools
+- [ ] Critique of method - llm as a jusde is based on summarisation of accumulated_information
+- [x] propogate descriptions of available tools to eval. Now adk_executor _format_available_tools has empty descritopns
+- [x] in adk make available tools for evaluater only have Required servers (Unit Converter in your test task) resident servers (Time MCP) Distraction servers (all 10 from the predefined list), not all. And it sists agents for some reason instead of servers. 
+- [x] why in eval prompt (after adk benchmark) convert tools are duclucaed? under [QuantDeveloperAgent] (42 tools) as convert_temperature: Convert temperature between units and under [Unit Converter] (14 tools) as unit_converter__convert_temperature: => fixed 
+- [x] run and test all servres and add keys
+- [x] context doesnt feed into context, i created summarised, but then got error BadRequestError: litellm.BadRequestError: AnthropicException - {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.2: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01FN86UMpvDHDMxed8s4vMbf. Each `tool_result` block must have a corresponding `tool_use` block in the previous message."},"request_id":"req_011CYb34yxo7p8CofXZcRsVp"}
+- [x] why i got Tool wikipedia__get_links with parameters {"title": "United Nations Framework Convention on Climate Change"} on server Wikipedia succeeded with result: None whe none when it wasnt none. Bug fixed
+- [x] Why search wikipedia alwyes reurn none? Root cause: Wikipedia's API returns 403 for requests without a User-Agent header. Browsers add one automatically, but Python's requests doesn't. The user_agent string was set on self but never passed to requests.get in the search method — and the broad except hid the 403 by silently returning [].
+- [x] model gave low scores for paraleleism - becsue thought hey are sequestial
+- [x] 2026-03-02 00:29:45,570 - google_adk_agents.content_compression - ERROR - [Tool Result Compression] Tool result compression failed for 'openapi_explorer__getApiOverview': cannot access local variable 'truncated_text' where it is not associated with a value
+- [x] Add eval truncation
+  
+- 2server, ddifferent agensts: reddit+game, hugging face+...,         "Reddit",
+        "DEX Paprika"
+
+- when swithced to tool with the same instiction coodfinator called subsagent multiple times parralley wotuh diffrertn queries itsead of giving full descripton https://cloud.langfuse.com/project/cmh6lqqwc00l7ad07nu1gagho/traces?dateRange=6h&peek=be29cd061133f7a8c1a49c91dde45390&timestamp=2026-03-03T20%3A56%3A35.921Z
+- should i make disalloaw trasfer to fpeers false (so to allow transwer to peer) 
+- [x] why i doesnt tools retunr emptyu in get_epic_tranding_games (it is fine)
+- [] check if is correct in eval ()
+- [x] check if was fuzzy or not (no, concrete)
+- [] check how metcrics for overall tasks are caluculated (like for files that alredy existed)
+- [] compare final answers of 2 approaeches, check mamually
+- [x] check that the round counting is correct (summarisations are not included)
+- [ ] there is some bug agent when called as a tool and after excuting internal tool makes a last LLM call but gets nuoting as an input, answering ""It looks like your message came through empty!" but in fact is see that langfuse logged prompt_token_count = 13646 (which is what i actually would expect), but it didnt log any text part as input except system promta and tool defenisions. So there is a problem probably in ADK or litellm, or anthropic api, which discards input messages 
+- [x] something off with parrallel logginfs
+- c4, 58 - agents, concrete task
+- d1 - tools, concrete task
+- 5d , e2 - agents, fuzzy
+- [x] remove tasks irrelevant, taks as task fuzzy and concrete mode
+- [x] make transfer available to everyone, check instirns on test run, run  fuzzy and concrete mode
+- [x] "Error during execution: Timed out while waiting for response to ClientRequest. Waited 180.0 seconds.", ignore and continue
+- agetns tool are way slower, cuz every insteance need to connect to all servers aganint
+- instuctions are vert impoertnt, it is mainantce loead to keep them upddated, but it seems sub agents without Without additional instructions, don't try to find the tool in the other sections like or. Return it to the. Coordinator if it's initially that, like if you cannot transfer, like if you cannot answer or you don't have complete information or information outside of your like it was written, even try to transfer directly to. Different specialists, but since the for example with reddit it wasn't specifically noted which something you could like assume which it wasn't written directly. The agent just said I don't have this functionality and didn't even try to find it somewhere. And yeah, so this instruction. That lists all of the available tools of the other agents is important. Were like more specific functionality. Rather they're in general description and the instruction that's that you can try to find somewhere else is also important
+- subgnes, concterte
+  - run [x] 2s, []3s
+  - [] check
+- tasks, concterte
+  - run [] 2s, []3s
+  - [] check
+- subgnes, fuzzy
+  - run [] 2s, []3s
+  - [] check
+- tasks, fuzzy
+  - run [] 2s, []3s
+  - [] check
+- why hugging face is not working? do i need api?
+- model wasnot able додуматься что нужно retry the same endpoind with diffrernt filters if prevous one sucseeded but retuned 0 results.
