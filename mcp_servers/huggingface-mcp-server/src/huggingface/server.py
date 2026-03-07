@@ -8,8 +8,9 @@ Hugging Face resources in a read-only manner.
 
 import asyncio
 import json
+import os
 from typing import Any, Dict, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 import httpx
 import mcp.server.stdio
@@ -28,8 +29,12 @@ hf_api = HfApi()
 # Base URL for the Hugging Face API
 HF_API_BASE = "https://huggingface.co/api"
 
+# Read optional HF token from environment (strip CRLF from Windows-formatted files)
+_HF_TOKEN = (os.environ.get("HF_TOKEN") or "").strip() or None
+_AUTH_HEADERS = {"Authorization": f"Bearer {_HF_TOKEN}"} if _HF_TOKEN else {}
+
 # Initialize HTTP client for making requests
-http_client = httpx.AsyncClient(timeout=30.0)
+http_client = httpx.AsyncClient(timeout=30.0, headers=_AUTH_HEADERS)
 
 
 # Helper Functions
@@ -57,7 +62,7 @@ async def handle_list_tools() -> list[types.Tool]:
         # Model Tools
         types.Tool(
             name="search-models",
-            description="Search for models on Hugging Face Hub",
+            description="Search for models on Hugging Face Hub. More specific filters will yield less results (often 0), but more relevant ones. Less filters will yield more results, but some might be not relevant.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -97,7 +102,7 @@ async def handle_list_tools() -> list[types.Tool]:
         # Dataset Tools
         types.Tool(
             name="search-datasets",
-            description="Search for datasets on Hugging Face Hub",
+            description="Search for datasets on Hugging Face Hub. More specific filters or detailed multi-word query will yield less results (often 0), but more relevant ones. Less filters and short (1-2 word) queries will yield more results, but some might be not relevant.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -131,7 +136,7 @@ async def handle_list_tools() -> list[types.Tool]:
         # Space Tools
         types.Tool(
             name="search-spaces",
-            description="Search for Spaces on Hugging Face Hub",
+            description="Search for Spaces on Hugging Face Hub. More specific filters or detailed multi-word query will yield less results (often 0), but more relevant ones. Less filters and short (1-2 word) queries will yield more results, but some might be not relevant.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -192,7 +197,7 @@ async def handle_list_tools() -> list[types.Tool]:
         # Collections Tools
         types.Tool(
             name="search-collections",
-            description="Search for collections on Hugging Face Hub",
+            description="Search for collections on Hugging Face Hub. More specific filters or detailed multi-word query will yield less results (often 0), but more relevant ones. Less filters and short (1-2 word) queries will yield more results, but some might be not relevant.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -287,7 +292,7 @@ async def handle_call_tool(
         if not model_id:
             return [types.TextContent(type="text", text="Error: model_id is required")]
 
-        data = await make_hf_request(f"models/{quote_plus(model_id)}")
+        data = await make_hf_request(f"models/{quote(model_id, safe='/')}")
 
         if "error" in data:
             return [
@@ -307,6 +312,7 @@ async def handle_call_tool(
             "downloads": data.get("downloads", 0),
             "likes": data.get("likes", 0),
             "lastModified": data.get("lastModified", ""),
+            "safetensors": data.get("safetensors", ""),
             "description": data.get("description", "No description available"),
         }
 
@@ -364,7 +370,7 @@ async def handle_call_tool(
                 types.TextContent(type="text", text="Error: dataset_id is required")
             ]
 
-        data = await make_hf_request(f"datasets/{quote_plus(dataset_id)}")
+        data = await make_hf_request(f"datasets/{quote(dataset_id, safe='/')}")
 
         if "error" in data:
             return [
@@ -441,7 +447,7 @@ async def handle_call_tool(
         if not space_id:
             return [types.TextContent(type="text", text="Error: space_id is required")]
 
-        data = await make_hf_request(f"spaces/{quote_plus(space_id)}")
+        data = await make_hf_request(f"spaces/{quote(space_id, safe='/')}")
 
         if "error" in data:
             return [
@@ -732,11 +738,11 @@ async def handle_read_resource(uri: AnyUrl) -> str:
     resource_type, resource_id = parts
 
     if resource_type == "model":
-        data = await make_hf_request(f"models/{quote_plus(resource_id)}")
+        data = await make_hf_request(f"models/{quote(resource_id, safe='/')}")
     elif resource_type == "dataset":
-        data = await make_hf_request(f"datasets/{quote_plus(resource_id)}")
+        data = await make_hf_request(f"datasets/{quote(resource_id, safe='/')}")
     elif resource_type == "space":
-        data = await make_hf_request(f"spaces/{quote_plus(resource_id)}")
+        data = await make_hf_request(f"spaces/{quote(resource_id, safe='/')}")
     else:
         raise ValueError(f"Unsupported resource type: {resource_type}")
 
@@ -802,7 +808,7 @@ async def handle_get_prompt(
         models_data = []
 
         for model_id in model_list:
-            data = await make_hf_request(f"models/{quote_plus(model_id)}")
+            data = await make_hf_request(f"models/{quote(model_id, safe='/')}")
             if "error" not in data:
                 models_data.append(data)
 
