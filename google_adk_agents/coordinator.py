@@ -32,13 +32,14 @@ def build_coordinator_instruction(specialist_agents: Dict[str, Agent], routing_m
         routing_rule = (
             "- Always delegate to specialists rather than answering directly\n"
             "- For multi-domain requests, you can call several specialists at the same time, if their sub-tasks are independent\n"
-            "- For several subtasks of the same domain that can be handled by the same specialist, call that specialist once with all relevant subtasks\n"
+            "- If several subtasks belong to the same domain, call that specialist once with all relevant subtasks, rather than calling it multiple times\n"
             "- Once all needed information is gathered, synthesize the final answer"
         )
     else:
         routing_rule = (
             "- Always delegate to specialists rather than answering directly\n"
             "- For complex requests spanning multiple domains, you might need several specialists\n"
+            "- Control the flow: if you see execution is looping (e.g. calling the same tools/agents with the same parameters over and over), try to change approach or if different approaches failed, synthesize an answer with the information you have.\n"
             "- Once all needed information is gathered, synthesize the final answer"
         )
 
@@ -51,34 +52,12 @@ Your primary role is to:
 4. Synthesize final responses when multiple agents contribute
 
 IMPORTANT ROUTING RULES:
-{routing_rule}"""
-
-    # Build specialist descriptions
-    specialist_lines = ["\n\nAVAILABLE SPECIALIST AGENTS:"]
-    
-    for agent_key, agent in specialist_agents.items():
-        config = AGENT_CONFIGS.get(agent_key)
-        if config:
-            specialist_lines.append(f"\n**{config.name}**")
-            specialist_lines.append(f"  Description: {config.description}")
-            specialist_lines.append(f"  Assigned servers: {', '.join(config.mcp_servers)}")
-    
-    specialist_section = "\n".join(specialist_lines)
-    
-    routing_guidance = f"""
-
-ROUTING GUIDANCE BY DOMAIN:
-- Academic/Research/NASA/Museums/Wikipedia → ResearcherAgent
-- Health/Medical/Nutrition/Clinical → HealthBioSpecialist
-- Math/Computing/Units/Time/APIs/NixOS → QuantDeveloperAgent
-- Crypto/DeFi/Cars/Gaming → MarketAnalystAgent
-- Maps/Weather/Parks/Movies/Reddit → LifestyleGuideAgent
-- OSINT/Icons/AI-Models/Divination → NicheSpecialistAgent
+{routing_rule}
 
 RESPONSE FORMAT:
-When you have gathered all necessary information from specialists, provide a clear, comprehensive answer that synthesizes their contributions. Always cite which specialist(s) provided the information."""
-
-    return base_instruction + specialist_section + routing_guidance
+When you have gathered all necessary information, provide a clear, comprehensive answer that synthesizes their contributions. Always cite which specialist(s) provided the information."""
+    
+    return base_instruction
 
 
 def create_coordinator_agent(

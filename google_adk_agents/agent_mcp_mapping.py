@@ -5,7 +5,7 @@ This module defines the mapping between specialist agents and their assigned MCP
 Based on domain expertise categorization from mcp_to_agent.md.
 """
 
-from typing import Dict, List, Set
+from typing import List, Dict, Set
 from dataclasses import dataclass, field
 
 
@@ -13,9 +13,14 @@ from dataclasses import dataclass, field
 class AgentConfig:
     """Configuration for a specialist agent."""
     name: str
-    description: str
     instruction: str
     mcp_servers: List[str] = field(default_factory=list)
+    description: str = field(default="", init=True)
+
+    def __post_init__(self):
+        if self.mcp_servers:
+            suffix = f"Has access to: {', '.join(self.mcp_servers)}"
+            self.description = f"{self.description}. {suffix}" if self.description else suffix
 
 
 # Agent configurations with their assigned MCP servers
@@ -34,8 +39,7 @@ Your expertise includes:
 When answering questions:
 1. Use the most appropriate tools from your available set
 2. Cross-reference information when possible
-3. Cite sources and provide context
-4. If you need information outside your domain, transfer directly to the appropriate specialist agent.""",
+3. Cite sources and provide context""",
         mcp_servers=[
             "Call for Papers",     # Conference tracking
             "Paper Search",        # Academic research
@@ -58,10 +62,7 @@ Your expertise includes:
 When answering questions:
 1. Prioritize accuracy for health-related information
 2. Use appropriate medical calculators when needed
-3. Provide nutritional context when relevant
-4. If you need information outside your domain, transfer directly to the appropriate specialist agent.
-
-IMPORTANT: Always clarify that medical information is for educational purposes and not a substitute for professional medical advice.""",
+3. Provide nutritional context when relevant""",
         mcp_servers=[
             "BioMCP",              # Clinical trials and health research
             "Medical Calculator",  # Clinical formulas (medcalc)
@@ -84,8 +85,7 @@ Your expertise includes:
 When answering questions:
 1. Use precise mathematical notation when appropriate
 2. Show step-by-step calculations for complex problems
-3. Convert units accurately with proper precision
-4. If you need information outside your domain, transfer directly to the appropriate specialist agent.""",
+3. Convert units accurately with proper precision""",
         mcp_servers=[
             "Math MCP",            # Advanced calculations
             "Scientific Computing", # Scientific computation (scientific_computation_mcp)
@@ -110,10 +110,7 @@ Your expertise includes:
 When answering questions:
 1. Provide current market data when available
 2. Include relevant market context
-3. Note any data freshness considerations
-4. If you need information outside your domain, transfer to the appropriate specialist agent.
-
-IMPORTANT: Financial data is for informational purposes only and not investment advice.""",
+3. Note any data freshness considerations""",
         mcp_servers=[
             "DEX Paprika",         # Cryptocurrency and DeFi (dexpaprika-mcp)
             "OKX Exchange",        # Crypto exchange data (okx-mcp)
@@ -136,8 +133,7 @@ Your expertise includes:
 When answering questions:
 1. Provide practical, actionable information
 2. Consider user preferences and context
-3. Include relevant location-based details
-4. If you need information outside your domain, transfer directly to the appropriate specialist agent.""",
+3. Include relevant location-based details""",
         mcp_servers=[
             "Google Maps",         # Navigation and geocoding (mcp-google-map)
             "Weather Data",        # Forecasts (weather_mcp)
@@ -160,8 +156,7 @@ Your expertise includes:
 When answering questions:
 1. Apply specialized knowledge appropriately
 2. Provide detailed technical information when needed
-3. Handle niche requests with appropriate expertise
-4. If you need information outside your domain, transfer directly to the appropriate specialist agent.""",
+3. Handle niche requests with appropriate expertise""",
         mcp_servers=[
             "OSINT Intelligence",  # Security and investigation (mcp-osint-server)
             "Huge Icons",          # Design and UI (hugeicons-mcp-server)
@@ -215,22 +210,6 @@ def filter_agent_servers(agent_name: str, available_servers: List[str]) -> List[
 COORDINATOR_CONFIG = AgentConfig(
     name="CoordinatorAgent",
     description="Main orchestrating agent that routes tasks to appropriate specialist agents based on domain expertise.",
-    instruction="""You are the Coordinator agent, responsible for understanding user requests and routing them to the appropriate specialist agents.
-
-Available specialist agents:
-1. **ResearcherAgent**: Academic research, NASA/space data, museum archives, Wikipedia, conference papers
-2. **HealthBioSpecialist**: Clinical trials, medical calculations, nutrition data
-3. **QuantDeveloperAgent**: Math, scientific computing, unit conversion, time/timezone, APIs, NixOS
-4. **MarketAnalystAgent**: Cryptocurrency, DeFi, car prices, gaming trends
-5. **LifestyleGuideAgent**: Maps, weather, national parks, movies, Reddit
-6. **NicheSpecialistAgent**: OSINT/security, design icons, AI/ML models, divination
-
-Your responsibilities:
-1. Analyze the user's request to understand the domain(s) involved
-2. Route the request to the most appropriate specialist agent(s)
-3. For multi-domain requests, coordinate between multiple specialists
-4. Synthesize final responses when multiple agents contribute
-
-Always transfer to specialists rather than answering directly. Only synthesize the final response after specialists have provided their contributions.""",
+    instruction="",  # Coordinator instructions are defined separately in coordinator.py and depend on routing mode
     mcp_servers=[]  # Coordinator doesn't have direct MCP access
 )

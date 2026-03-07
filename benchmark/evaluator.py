@@ -286,9 +286,9 @@ class LLMJudge:
             "- 8/20 tools optimal (60% defect rate) = Score 4",
             "",
             "Parallelism & Efficiency:",
-            "IMPORTANT CONSTRAINT: Agents are capped at 10 tool calls per round to avoid exceeding the context window.",
-            "Do NOT penalize an agent for splitting tool calls across multiple rounds when the total parallelizable set exceeds 10.",
-            "Only penalize if the agent failed to parallelize tools that COULD fit within the 10-tool cap in a single round.",
+            "Important Constraints:",
+            "- Agents are capped at 10 tool calls per round to avoid exceeding the context window. Do NOT penalize an agent for splitting tool calls across multiple rounds when the total parallelizable set exceeds 10. Only penalize if the agent failed to parallelize tools that COULD fit within the 10-tool cap in a single round.",
+            "- transfer_to_agent calls is not an overhead, since every specilist agent has accsess to limited set of tools, and transfer_to_agent is used to transfer control between agents. Do NOT penalize transfer_to_agent calls, unless you see a loop of redundant transfer_to_agent calls with no progress.",
             "- 9/10 parallelizable tasks done in parallel (10% missed) = Score 9",
             "- 8/10 parallelizable tasks done in parallel (20% missed) = Score 6",
             "- 4/10 parallelizable tasks done in parallel (60% missed) = Score 4",
@@ -558,6 +558,7 @@ class LLMJudge:
         formatted_rounds = []
         for round_num in sorted(execution_results_by_round.keys()):
             round_info = execution_results_by_round[round_num]
+            sub_agents_header_written = False
             for tool_result in round_info:
                 inner_calls = tool_result.get("inner_tool_calls")
                 thread = tool_result.get("thread")
@@ -590,8 +591,10 @@ class LLMJudge:
                     status = "succeeded" if tool_result.get("success", False) else "failed"
                     formatted_rounds.append(f"  Agent result ({status}): {agent_response}")
                 else:
-                    # Legacy / sub_agents mode: flat format (backward compatible)
-                    formatted_rounds.append(f"--- Summary of Round {round_num} ---")
+                    # Legacy / sub_agents mode: one header per round, then list all tools
+                    if not sub_agents_header_written:
+                        formatted_rounds.append(f"--- Summary of Round {round_num} ---")
+                        sub_agents_header_written = True
                     self._format_tool_entry(tool_result, formatted_rounds, max_response_chars)
 
             formatted_rounds.append("")  # Empty line between rounds

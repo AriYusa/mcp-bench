@@ -71,10 +71,19 @@ def create_specialist_agent(
     # Append the universal tool-call-limit constraint to the specialist instruction
     tool_limit_note = """
 
-TOOL CALL LIMIT (CRITICAL CONSTRAINT):
+TOOL CALL LIMIT:
 - You may call at most 10 tools per round to prevent context window overflow.
 - When a task requires more than 10 tool calls, prioritize the most relevant ones first and continue with the remaining tools in subsequent rounds.
-- Never sacrifice quality of selected calls because of this limit — choose the most impactful tools each round."""
+- Never sacrifice quality of selected calls because of this limit — choose the most impactful tools each round.
+
+ERROR AND FALLBACK HANDLING:
+If a tool call fails or returns no useful results, try an alternative approach — but calibrate your effort to the importance of the subtask:
+- High-importance steps (subsequent execution depends on the result): Try up to 2 alternatives, such as different parameters, a reformulated query, a different tool, or delegating to another agent with relevant expertise.
+- Low-importance steps (result is supplementary or execution can continue without it): Try at most 1 alternative, then move on. Do not block progress on optional enrichments.
+
+ROUTING RULES:
+If you need information outside your domain or don't have fitting tools to fully cover the request, try transfering to the appropriate agent."""
+
     constrained_instruction = agent_config.instruction + tool_limit_note
 
     # Create the ADK agent
