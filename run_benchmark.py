@@ -27,7 +27,17 @@ if __name__ == "__main__":
     try:
         from benchmark.runner import main
         asyncio.run(main())
+        
+        # Flush and shutdown Langfuse client to ensure clean exit
+        try:
+            langfuse.flush()
+        except Exception as e:
+            print(f"Warning: Error flushing Langfuse: {e}")
+            
     except ImportError as e:
         print(f"Import error: {e}")
         print("Please ensure all dependencies are installed and you're running from the project root.")
         sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nBenchmark interrupted by user")
+        sys.exit(0)
