@@ -27,8 +27,6 @@ from typing import Dict, List, Any, Optional
 # Add parent directory to Python path to resolve imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from openai import AsyncAzureOpenAI
-
 from agent.executor import TaskExecutor
 from mcp_modules.server_manager_persistent import PersistentMultiServerManager
 from llm.provider import LLMProvider
@@ -428,12 +426,7 @@ class BenchmarkRunner:
         
         # Initialize judge provider once for this task execution
         if not hasattr(self, '_judge_provider') or self._judge_provider is None:
-            azure_client = AsyncAzureOpenAI(
-                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-                api_version=config_loader.get_azure_api_version()
-            )
-            self._judge_provider = LLMProvider(azure_client, "o4-mini", "azure")
+            self._judge_provider = LLMProvider("anthropic/claude-sonnet-4-5-20250929")
         
         # Step 1: Prepare task execution information
         task_execution_info = await self._prepare_task_execution(task_info)
@@ -1107,6 +1100,7 @@ Examples:
     parser.add_argument(
         '--disable-judge-stability',
         action='store_true',
+        default=None,
         help=f'Disable LLM Judge stability testing (default: {"enabled" if default_judge_stability else "disabled"})'
     )
     
@@ -1115,6 +1109,7 @@ Examples:
     parser.add_argument(
         '--disable-filter-problematic-tools',
         action='store_true',
+        default=None,
         help=f'Disable filtering of known problematic tools (default: {"enabled" if default_filter_tools else "disabled"})'
     )
     
@@ -1122,6 +1117,7 @@ Examples:
     parser.add_argument(
         '--disable-concurrent-summarization',
         action='store_true',
+        default=None,
         help=f'Disable concurrent content summarization (default: {"enabled" if default_concurrent_summarization else "disabled"})'
     )
     
@@ -1129,7 +1125,16 @@ Examples:
     parser.add_argument(
         '--disable-fuzzy',
         action='store_true',
+        default=None,
         help=f'Use detailed task descriptions instead of fuzzy descriptions (default: {"fuzzy" if default_use_fuzzy else "detailed"})'
+    )
+    
+    # ADK Multi-Agent System
+    parser.add_argument(
+        '--use-adk',
+        action='store_true',
+        help='Use Google ADK multi-agent system instead of single-agent executor. '
+             'Routes tasks to specialist agents (Researcher, HealthBio, QuantDev, MarketAnalyst, LifestyleGuide, NicheSpecialist)'
     )
     
     parser.add_argument(
@@ -1187,15 +1192,39 @@ def _parse_and_validate_args():
 
 def _create_runner_and_get_models(args, tasks_file, enable_distraction):
     """Create benchmark runner and get available models"""
-    runner = BenchmarkRunner(
-        tasks_file=tasks_file,
-        enable_distraction_servers=enable_distraction,
-        distraction_count=args.distraction_count,
-        enable_judge_stability=not args.disable_judge_stability,
-        filter_problematic_tools=not args.disable_filter_problematic_tools,
-        concurrent_summarization=not args.disable_concurrent_summarization,
-        use_fuzzy_descriptions=not args.disable_fuzzy
-    )
+    # Choose runner based on --use-adk flag
+    if args.use_adk:
+        from google_adk_agents.adk_benchmark_runner import ADKBenchmarkRunner
+        from google_adk_agents import adk_config_loader
+        # For each flag, if not explicitly passed, defer to adk_benchmark_config.yaml
+        adk_judge_stability = (not args.disable_judge_stability) if args.disable_judge_stability is not None else adk_config_loader.is_judge_stability_enabled()
+        adk_filter_tools = (not args.disable_filter_problematic_tools) if args.disable_filter_problematic_tools is not None else adk_config_loader.is_problematic_tools_filter_enabled()
+        adk_concurrent = (not args.disable_concurrent_summarization) if args.disable_concurrent_summarization is not None else adk_config_loader.is_concurrent_summarization_enabled()
+        adk_fuzzy = (not args.disable_fuzzy) if args.disable_fuzzy is not None else adk_config_loader.use_fuzzy_descriptions()
+        runner = ADKBenchmarkRunner(
+            tasks_file=tasks_file,
+            enable_distraction_servers=enable_distraction,
+            distraction_count=args.distraction_count,
+            enable_judge_stability=adk_judge_stability,
+            filter_problematic_tools=adk_filter_tools,
+            concurrent_summarization=adk_concurrent,
+            use_fuzzy_descriptions=adk_fuzzy,
+        )
+    else:
+        # For each flag, if not explicitly passed, defer to benchmark_config.yaml
+        root_judge_stability = (not args.disable_judge_stability) if args.disable_judge_stability is not None else config_loader.is_judge_stability_enabled()
+        root_filter_tools = (not args.disable_filter_problematic_tools) if args.disable_filter_problematic_tools is not None else config_loader.is_problematic_tools_filter_enabled()
+        root_concurrent = (not args.disable_concurrent_summarization) if args.disable_concurrent_summarization is not None else config_loader.is_concurrent_summarization_enabled()
+        root_fuzzy = (not args.disable_fuzzy) if args.disable_fuzzy is not None else config_loader.use_fuzzy_descriptions()
+        runner = BenchmarkRunner(
+            tasks_file=tasks_file,
+            enable_distraction_servers=enable_distraction,
+            distraction_count=args.distraction_count,
+            enable_judge_stability=root_judge_stability,
+            filter_problematic_tools=root_filter_tools,
+            concurrent_summarization=root_concurrent,
+            use_fuzzy_descriptions=root_fuzzy,
+        )
     available_models = list(runner.model_configs.keys())
     
     return runner, available_models
@@ -1254,6 +1283,12 @@ def _print_configuration(selected_models, available_models, runner, args):
     description_mode = 'fuzzy' if runner.use_fuzzy_descriptions else 'detailed'
     ref_mode = ' (with concrete ref)' if runner.enable_concrete_description_ref and runner.use_fuzzy_descriptions else ''
     print(f"   Task descriptions: {description_mode}{ref_mode}")
+    
+    # Print ADK configuration
+    if args.use_adk:
+        print(f"   Executor: ADK multi-agent (6 specialists)")
+    else:
+        print(f"   Executor: Single-agent")
     
     # Print cache configuration
     if args.enable_cache:

@@ -1,0 +1,182 @@
+{
+  "generation_info": {
+    "status": "completed"
+  },
+  "server_tasks": [
+    {
+      "server_name": "Hugging Face+Paper Search",
+      "tasks": [
+        {
+          "task_id": "hugging_face_paper_search_001",
+          "task_description": "A natural language processing researcher needs to select a lightweight, open‐license transformer for named entity recognition (NER) and pair it with a well‐established NER dataset. Then they want to confirm the dataset’s popularity in recent publications and finally find an interactive Hugging Face Space for live benchmarking. Do the following:\n\n1. Use Hugging Face:search-models with query=\"ner\" and tags=\"token-classification\", limit=10 to retrieve up to 10 candidate NER models.\n2. For each returned model_id, call Hugging Face:get-model-info and filter to those with license exactly \"apache-2.0\" and weight_size (in bytes) less than 2_000_000_000 (≈2 GB).\n3. Use Hugging Face:search-datasets with query=\"ner\" and tags=\"token-classification\", limit=5 to retrieve up to 5 NER datasets.\n4. For each returned dataset_id, call Hugging Face:get-dataset-info and record its total number of examples (sum of all splits).\n5. Select the dataset with the highest total number of examples; call it SELECTED_DATASET.\n6. Cross-validate SELECTED_DATASET’s popularity:\n   a. Call Paper Search:search_arxiv with query=\"SELECTED_DATASET named entity recognition\" and max_results=5.  \n   b. For each returned paper, call Paper Search:read_arxiv_paper to extract text, count how many papers mention SELECTED_DATASET exactly by its dataset_id.  \n   c. If fewer than 3 papers mention SELECTED_DATASET, call Paper Search:search_pubmed with the same query and max_results=5 and count mentions there.  \n   d. Total publication mentions = arXiv_mentions + PubMed_mentions (if any).\n7. Using SELECTED_DATASET, call Hugging Face:search-spaces with query=\"ner-evaluation\" , sdk=\"gradio\" , limit=3 to find interactive demos.\n8. For the top returned space_id, call Hugging Face:get-space-info to retrieve its URL and description.\n\nProduce a final JSON report with keys:\n• selected_models: list of { model_id, license, weight_size }  \n• selected_dataset: { dataset_id, total_examples }  \n• publication_mentions: integer (total from arXiv and PubMed)  \n• interactive_space: { space_id, sdk, url }\n",
+          "fuzzy_description": "I’m knee-deep in a little side project on named entity recognition for my thesis and hitting a wall. I’d love to pick a really lightweight transformer—something under about 2 GB so it doesn’t swallow my laptop—and it has to be full open-license so I can share everything. Then I want to use a “classic” NER dataset with plenty of examples to give my results some weight. On top of that, I’m curious how many recent papers actually mention whichever dataset I choose—you know, to prove it’s still a popular benchmark. Finally, it’d be amazing to play around with a live demo in the browser so I can sanity-check my setup. \n\nCan you walk me through your top recommendations? I’m after the model name/ID, its license type and file size, the dataset name/ID with total example count, a ballpark of how often it’s been cited in the past few months, plus a link to an interactive demo. Really need real numbers and solid sources—I can’t bring vague guesses to my advisor!\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Inherent dependencies:\n• HF search-models → get-model-info: to filter by license and size.\n• HF search-datasets → get-dataset-info: to retrieve example counts.\n• HF search-spaces → get-space-info: to retrieve space details.\n• Paper Search search_arxiv → read_arxiv_paper: to extract text and count dataset mentions.\n\nScenario‐based dependencies:\n1. The shortlist of model_ids from search-models feeds get-model-info for filtering – a sequential chain.\n2. The dataset_id chosen from get-dataset-info sets the query parameter for search_arxiv and, conditionally, search_pubmed.\n3. arXiv mention count decides whether to invoke PubMed search – a decision branch (if mentions < 3 → fallback to search_pubmed).\n4. The final selected dataset_id also drives the HF search-spaces call (reusing SELECTED_DATASET in the query), linking dataset selection to interactive demo lookup.\n\nParallel vs Sequential:\n• Model filtering chain and dataset discovery chain are two parallel pipelines initially.\n• Cross-validation (search_arxiv, read_arxiv_paper, optional search_pubmed) is a conditional sequential pipeline triggered by dataset selection.\n\nCross-server dependencies:\n• HF dataset_id → Paper Search search_arxiv query.\n• Publication mention results from Paper Search drive a conditional re-query on another Paper Search server (PubMed).\n• HF spaces search uses the HF dataset selection – reinforcing the HF→Paper Search→HF flow.\n\nThis task cannot be completed without following these tool chains, decision points, and cross-server data flows.",
+          "distraction_servers": [
+            "DEX Paprika",
+            "FruityVice",
+            "Game Trends",
+            "Math MCP",
+            "Medical Calculator",
+            "NASA Data",
+            "NixOS",
+            "OpenAPI Explorer",
+            "Reddit",
+            "Unit Converter"
+          ]
+        }
+      ],
+      "servers": [
+        "Hugging Face",
+        "Paper Search"
+      ],
+      "combination_name": "AI Research",
+      "combination_type": "two_server_combinations"
+    },
+    {
+      "server_name": "Hugging Face+Paper Search",
+      "tasks": [
+        {
+          "task_id": "hugging_face_paper_search_002",
+          "task_description": "Develop a production-ready sentiment analysis pipeline for COVID-19 clinical trial reports using Hugging Face Hub resources and academic paper sources. Execute the following steps in order:\n\n1. Use Hugging Face search-models with {\"query\":\"sentiment-analysis\",\"author\":\"huggingface\",\"tags\":\"text-classification\",\"limit\":5} to find 5 candidate models.\n2. From the returned list, take the top 3 model_ids and call get-model-info on each to retrieve model_size (GB), inference_speed (examples/sec), and architecture details.\n3. Use Hugging Face search-datasets with {\"query\":\"clinical trial\",\"tags\":\"text-classification\",\"limit\":3} to find 3 candidate datasets.\n4. For the top 2 dataset_ids, call get-dataset-info to obtain num_examples and label_distribution.\n5. If either dataset has fewer than 1000 examples, re-run search-datasets with {\"query\":\"medical reports\",\"tags\":\"text-classification\",\"limit\":2} to find additional datasets, then call get-dataset-info on those until you have at least two datasets each ≥1000 examples.\n6. Merge the selected datasets and verify total num_examples ≥2000. If still below 2000, perform one more search-datasets with {\"query\":\"healthcare reports\",\"tags\":\"text-classification\",\"limit\":2} and repeat get-dataset-info.\n7. Use Hugging Face search-collections with {\"owner\":\"nvidia\",\"item\":\"datasets\",\"query\":\"covid19\",\"limit\":2} to find up to 2 collections. For each, call get-collection-info to extract included dataset_ids and example counts; if a collection offers ≥500 examples, add it to the merged dataset.\n8. Call get-daily-papers to retrieve today’s list of curated papers. Filter for titles containing “COVID-19” from the past 3 months. If fewer than 5 papers meet this criterion, call Paper Search search_pubmed with {\"query\":\"COVID-19 clinical trial\",\"max_results\":10} and Paper Search search_arxiv with {\"query\":\"COVID-19 clinical trial\",\"max_results\":10} to supplement the list.\n9. For each selected paper:\n   a. If it has an arXiv ID, call download_arxiv with that ID, then read_arxiv_paper to extract full text.\n   b. If it only has a PubMed ID, call download_pubmed (note: PDF download is unsupported) and skip text extraction.\n10. Preprocess all extracted paper texts into a unified corpus of at least 5 documents.\n11. For each of the 3 candidate models from step 2, compute a suitability score = inference_speed (examples/sec) ÷ model_size (GB). Rank models by this score and select the top-scoring model_id.\n12. Use Hugging Face search-spaces with {\"query\":\"covid-sentiment-demo\",\"sdk\":\"gradio\",\"limit\":2} to find existing demo spaces. For each, call get-space-info to identify missing interface features (e.g., batch upload, live metrics).\n13. Propose a new Space configuration. Specify:\n    • space_id: a new name “covid-sentiment-pipeline”\n    • selected_model_id\n    • merged_dataset_ids (list)\n    • corpus_size (number of extracted documents)\n    • inference_config (batch_size, max_length)\n    • gradio components (text_input, sentiment_output, example_selector)\n\nExpected output: A JSON object with keys: selected_model_id, total_dataset_examples, number_of_papers_processed, final_score_ranking (list of model_ids and scores), proposed_space_name, and space_components (listing each configured component).",
+          "fuzzy_description": "Hey, I’ve got to throw together a quick proof-of-concept sentiment tool for COVID-19 clinical trial reports by next week and I’m a bit stuck on the kickoff steps. Basically, I want to pick a few popular pre-trained sentiment models from the usual public hubs, compare how big they are on disk versus how many documents they can process per second, then pick the one that gives me the best speed-to-size trade-off.  \n\nNext, I need to pull together at least 2,000 trial-report texts from open datasets and supplement that with about five real COVID clinical-trial papers from the past three months—if the curated feeds don’t have enough, I’ll have to dive into preprint servers to top up. Once I’ve preprocessed everything into a mini-corpus, I want to spin up a simple web demo that can handle batch uploads and show live sentiment metrics.\n\nIn the end, I need a clear summary I can show my team:  \n• Which model I picked (with its size and throughput)  \n• Total number of data examples I’m working with  \n• How many papers made it into the corpus  \n• A ranking of the candidate models by their speed-to-size ratio  \n• A sketch of the demo’s key features/components  \n\nCould you help me pull together all those numbers and outline the final setup with real, evidence-backed figures? I really need concrete stats to convince everyone this has legs.",
+          "dependency_analysis": "Inherent dependencies:\n- HF: search-models → get-model-info for detailed model metadata.\n- HF: search-datasets → get-dataset-info for dataset statistics.\n- HF: search-collections → get-collection-info to augment datasets.\n- HF: get-daily-papers → identify paper IDs → Paper Search download_arxiv → read_arxiv_paper (text extraction); fallback to search_pubmed when arXiv yields insufficient results.\n- HF: search-spaces → get-space-info to inspect existing demos.\n\nScenario-based dependencies & data flow:\n- Model_info outputs (model_size, inference_speed) feed into a scoring function to rank and select the best model.\n- Dataset_info (num_examples) triggers conditional loops: if <1000 examples, re-search with alternate queries until thresholds (per-dataset ≥1000, total ≥2000) are met.\n- Collection_info outputs provide extra dataset_ids and example counts; adding collections is conditional (≥500 examples).\n- get-daily-papers results determine whether to use arXiv download/read or fallback to PubMed search for paper content.\n- Parallel processing of multiple paper downloads/readers merges into a single text corpus.\n- The corpus size and dataset sizes inform model suitability scoring.\n\nCritical decision points & branches:\n- Dataset size check (<1000) → conditional re-search.\n- Total dataset size check (<2000) → additional search iteration.\n- Paper count check (<5) → fallback searches on PubMed and arXiv.\n- Model scoring → selection of top-scoring model.\n\nCross-server interactions:\n- HF dataset_info thresholds drive additional Paper Search steps if content volume is low.\n- Paper Search content feeds back to HF pipeline for model evaluation.\n- HF Space search validates demo features before proposing a new Space.\n\nThis workflow demands strict sequencing, conditional loops, parallel downloads, cross-validation, and deep chaining across both Hugging Face and Paper Search servers.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "Car Price Evaluator",
+            "DEX Paprika",
+            "FruityVice",
+            "Google Maps",
+            "NASA Data",
+            "OKX Exchange",
+            "OSINT Intelligence",
+            "Reddit",
+            "Wikipedia"
+          ]
+        }
+      ],
+      "servers": [
+        "Hugging Face",
+        "Paper Search"
+      ],
+      "combination_name": "AI Research",
+      "combination_type": "two_server_combinations"
+    },
+    {
+      "server_name": "Game Trends+Reddit",
+      "tasks": [
+        {
+          "task_id": "game_trends_reddit_000",
+          "task_description": "Generate a cross-platform Weekly Gaming Trend & Community Sentiment Report for the upcoming week. The agent must:\n1. Verify the Game Trends API is healthy.\n2. In parallel, fetch Steam’s current trending games, top sellers, and most-played titles; also fetch Epic Games Store’s current trending games and currently free or upcoming free titles.\n3. From Steam data, compute a combined score for each title: 40% weight to trending rank, 30% to sales rank, and 30% to player count rank. Select the top five scored Steam titles.\n4. From Epic data, mark which of those five titles appear in Epic’s trending list and which of those are currently free or upcoming free.\n5. Identify the three titles that are (a) among Steam’s top five by score and (b) present in Epic’s trending list. If fewer than three satisfy both, include the next highest-scored Steam title that is in Epic’s free or upcoming free lists.\n6. Cross-validate these three titles against the unified list from get_all_trending_games. If any title is missing, flag a data inconsistency for that title.\n7. For each of the three selected games:\n   a. Attempt to fetch up to 10 hot Reddit threads from the game’s subreddit (subreddit name exactly matching the game title).  \n   b. If fewer than five threads are returned, fallback to fetching the top five threads from r/gaming.  \n   c. For each thread ID retrieved, fetch the full post content with up to three top-level comments and comment depth of two.\n8. Summarize for each game: Steam rank metrics, Epic status (trending/free), inconsistency flags, and a brief sentiment overview derived from the Reddit post titles and comments.\n\nOutput the report as a JSON array of three objects, each with fields: {\"game_name\",\"steam_trending_rank\",\"steam_sales_rank\",\"steam_played_rank\",\"epic_status\",\"inconsistency_flag\",\"reddit_threads\": [{\"post_id\",\"title\",\"top_comments\": [\"comment1\",\"comment2\",…]}],\"sentiment_summary\"}.",
+          "fuzzy_description": "Hey, I’m prepping our next gaming newsletter and the boss wants a quick but solid rundown of which titles are going to crush it over the coming week on both Steam and the Epic store—bonus points if any are currently free or about to be. Could you dig into Steam’s hot trends, top sellers, and player counts, figure out the handful of games that really stand out when you weight those metrics, and then see which of those also show up as trending or freebies on Epic? I’d love to land on three final picks that bridge both platforms—or if we come up short, swap in the next best one that’s free on Epic. Also, it’d be great to cross-check against a general trending feed just to catch any odd gaps. Once we’ve got our trio, can you pull the top threads from each game’s subreddit (or fallback to r/gaming if they’re quiet), grab a few key comments, and give me a quick sentiment snapshot for each? I need it in a neat format I can drop straight into our tool—and it really has to be backed by real numbers and actual chatter, since I’ll need to show my editor the proof. Thanks!",
+          "dependency_analysis": "1. Sequential health check: get_api_health must succeed before any data retrieval.  \n2. Parallel data pulls: Steam calls (get_steam_trending_games, get_steam_top_sellers, get_steam_most_played) run concurrently; Epic calls (get_epic_trending_games, get_epic_free_games) run concurrently.  \n3. Data fusion: Steam outputs feed directly into a scoring algorithm that weights trending, sales, and play data.  \n4. Branching decision: intersect top five scored Steam titles with Epic trending; if intersection < 3, extend with free-or-upcoming titles.  \n5. Cross-server validation: the final three titles are checked against get_all_trending_games; mismatches are flagged.  \n6. Reddit dependency chain: for each title, fetch_reddit_hot_threads(subreddit=title); if thread count < 5, fallback to fetch_reddit_hot_threads(subreddit=\"gaming\").  \n7. Iterative refinement: each thread ID feeds into fetch_reddit_post_content to retrieve comments.  \n8. Aggregation: sentiment_summary is derived from the collected Reddit post titles and comments.  \nCritical decision points include fallback to r/gaming and selection adjustment when Steam–Epic intersection is insufficient. Cross-server dependencies ensure consistency between Game Trends (all servers) and Reddit data for community sentiment.",
+          "distraction_servers": [
+            "Context7",
+            "DEX Paprika",
+            "Math MCP",
+            "Medical Calculator",
+            "Movie Recommender",
+            "National Parks",
+            "NixOS",
+            "OSINT Intelligence",
+            "OpenAPI Explorer",
+            "Paper Search"
+          ]
+        }
+      ],
+      "servers": [
+        "Game Trends",
+        "Reddit"
+      ],
+      "combination_name": "Entertainment Social",
+      "combination_type": "two_server_combinations"
+    },
+    {
+      "server_name": "Game Trends+Reddit",
+      "tasks": [
+        {
+          "task_id": "game_trends_reddit_001",
+          "task_description": "Perform a cross‐platform, cross‐server analysis to identify and investigate games with the largest gap between social interest and actual engagement metrics over the past week. Steps:\n1. Call Game Trends:get_api_health to check API status.\n   • If status is OK, call Game Trends:get_all_trending_games to retrieve a combined list of trending titles across Steam and Epic.\n   • If status is not OK, call Game Trends:get_steam_trending_games and Game Trends:get_epic_trending_games separately, then merge their results into one trending list.\n2. Call Game Trends:get_epic_free_games to retrieve all current and upcoming free titles on Epic Games Store, and tag any of those in the merged trending list with Free=Yes.\n3. In parallel, call Game Trends:get_steam_top_sellers and Game Trends:get_steam_most_played to get Steam’s current top‐selling and most‐played lists.\n4. For each game in the merged trending list:\n   a. If it appears in Steam top sellers, record its sales rank; otherwise mark SalesRank=None.\n   b. If it appears in Steam most played, record its player count rank; otherwise mark PlayerRank=None.\n   c. Compute a ‘difference_score’ = |TrendingRank – SalesRank| + |TrendingRank – PlayerRank| (treat None as a large penalty).\n5. Sort all trending games by descending difference_score and select the top 3 titles for deeper analysis.\n6. Call Reddit:fetch_reddit_hot_threads with subreddit=\"gaming\" and limit=50 to retrieve hot posts. For each of the top 3 games, scan the thread titles for mentions of the exact game name and count how many posts mention it.\n7. Identify which of the three has the highest reddit_mentions_count. For that single game, pick the highest‐scoring thread ID and call Reddit:fetch_reddit_post_content with comment_limit=20 and comment_depth=3 to retrieve detailed discussion.\n8. Produce a JSON report listing, for each of the three games: name, platform source(s), trending rank, sales rank, player rank, difference_score, Free tag (Yes/No), reddit_mentions_count; and for the game with the highest buzz, include the reddit_top_post_id and full reddit_comments output.",
+          "fuzzy_description": "Hey, I’m working on a little side project to spot games that are huge on social hype but aren’t really selling or being played nearly as much—and I want to focus on the past week. You know how some titles suddenly shoot up the trending list on the big PC storefronts but then their sales rank or concurrent player count barely budges? I’d love to pull together all those trending picks, check their actual sales rank and player-count rank to come up with a simple “hype-vs-real” gap score, and tag any that happen to be free deals. Then, I want to zero in on the top three biggest mismatches and see how often each one pops up in the main gaming discussion community—counting how many hot threads mention them. For the single game that gets the most chatter, could you grab the most popular thread ID and pull about 20 comments (going down a few reply levels) so I can see what folks are saying? In the end, I need a clear breakdown for each of the three—name, where it trended, hype rank, sales rank, player rank, gap score, free-yes/no, mention count—and for that buzziest title include the top thread ID plus its comment snippet. I really need solid numbers and actual sources from the last seven days—no vague guesses—so I can back this up.\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Inherent dependencies:\n- get_api_health decides whether to call get_all_trending_games or fallback to get_steam_trending_games + get_epic_trending_games.\n- get_all_trending_games (or merged per‐platform trending) produces the master trending list used by all downstream steps.\n- get_epic_free_games output is cross‐referenced against the trending list to tag free titles.\n- get_steam_top_sellers and get_steam_most_played provide metrics that feed into difference_score computations.\n- fetch_reddit_hot_threads output is filtered by game names from the trending list to measure community buzz.\n- fetch_reddit_post_content is triggered by the hottest thread ID found in the filtered Reddit data.\n\nScenario‐based dependencies:\n- Decision point after API health: branch into unified vs. separate trending calls.\n- Merged trending list then drives tagging, metric lookups, and score calculations in sequence.\n- Parallel calls for sales and player metrics reduce latency and converge into the same data structure for scoring.\n- After scoring and selecting the top 3 games, Reddit calls depend on that selection to query community data.\n- A second decision point chooses which of the top 3 games has the highest reddit_mentions_count and triggers a deeper fetch_reddit_post_content.\n\nParallel vs sequential:\n- Initial health check → sequential trending calls.\n- Epic free games tagging waits for merged trending list → sequential.\n- Steam top sellers and most played can run in parallel → join for scoring.\n- Reddit hot threads fetch is one call → filter and decision → conditional post content fetch.\n\nCross‐server dependencies:\n- Game Trends outputs (trending, sales, play stats, free games) determine parameters and filtering logic for Reddit queries.\n- Reddit community buzz data validates and contextualizes platform metrics, highlighting discrepancies.\n- Branching logic ensures robustness if Game Trends API health is degraded, falling back to per‐platform calls without external inputs.",
+          "distraction_servers": [
+            "Context7",
+            "FruityVice",
+            "Medical Calculator",
+            "Metropolitan Museum",
+            "Movie Recommender",
+            "NASA Data",
+            "National Parks",
+            "Paper Search",
+            "Scientific Computing",
+            "Wikipedia"
+          ]
+        }
+      ],
+      "servers": [
+        "Game Trends",
+        "Reddit"
+      ],
+      "combination_name": "Entertainment Social",
+      "combination_type": "two_server_combinations"
+    },
+    {
+      "server_name": "Reddit+DEX Paprika",
+      "tasks": [
+        {
+          "task_id": "reddit_dex_paprika_000",
+          "task_description": "You are a crypto research analyst. Perform an on-chain vs social signal correlation study for the Ethereum token and its top liquidity pools on the Ethereum network. Execute the following without asking for more information:  \n\n1. Call DEX Paprika:getNetworks to retrieve all supported networks and confirm “ethereum” is available.  \n2. Call DEX Paprika:search with query=\"Ethereum\" to identify the official Ethereum tokenAddress and its network.  \n3. Call DEX Paprika:getTokenDetails with network=\"ethereum\" and the discovered tokenAddress to fetch token metadata.  \n4. Call DEX Paprika:getTokenPools with network=\"ethereum\", tokenAddress from step 2, limit=10, orderBy=\"volume_usd\", sort=\"desc\" to list top pools trading Ethereum.  \n5. From the returned token pools, select the top 3 pools by USD volume.  For each of those 3 pools:  \n   a. Call DEX Paprika:getPoolDetails with network=\"ethereum\" and poolAddress to fetch pool composition and current metrics.  \n   b. Call DEX Paprika:getPoolOHLCV with network=\"ethereum\", poolAddress, start=\"7 days ago\", end=\"now\", limit=7, interval=\"24h\", inversed=false to retrieve daily OHLCV for the past 7 days.  \n   c. Call DEX Paprika:getPoolTransactions with network=\"ethereum\", poolAddress, page=0, limit=50 to retrieve the 50 most recent swap/add/remove events.  \n6. In parallel, fetch social signals:  \n   a. Call Reddit:fetch_reddit_hot_threads for subreddit=\"ethereum\", limit=5.  \n   b. Call Reddit:fetch_reddit_hot_threads for subreddit=\"cryptocurrency\", limit=5.  \n7. From each subreddit’s result, take the 3 hottest post IDs and call Reddit:fetch_reddit_post_content with post_id, comment_limit=10, comment_depth=2 to retrieve full thread content.  \n8. Analyze and cross-validate:  \n   • Correlate daily OHLCV and transaction spikes in each pool (step 5b/5c) with the timing and volume of Reddit discussions (step 7).  \n   • Identify any mentions of “ETH”, “Ethereum”, or the specific poolAddress strings in post titles or comments.  \n9. Produce a JSON report with three sections:  \n   • on_chain_metrics: token metadata, for each of the 3 pools include pool composition, 7-day OHLCV table, transaction count summary;  \n   • social_signals: list of fetched Reddit threads (subreddit, post title, URL, total comments) and a flag if the pool or token is mentioned;  \n   • correlation_insights: for each pool, note days where volume or transaction count spiked alongside elevated Reddit discussion (count of posts/comments that day), and whether mention overlap suggests social-driven movement.",
+          "fuzzy_description": "I’m putting together a quick deep-dive on ETH and how its biggest liquidity spots are behaving versus what people are buzzing about online. First, I want to make sure I’m looking at the official Ethereum token on mainnet. Then could you find the three ETH pools moving the most USD volume right now and pull their daily 24-hour price/volume figures over the past week, plus roughly fifty of the latest swap/add/remove events for each? At the same time, grab the five hottest threads from r/ethereum and r/cryptocurrency, then dive into the three most engaging posts in each (with a handful of comments). Finally, line up any days when those pool volumes or transaction counts spike with peaks in Reddit chatter. I really need hard numbers and a clear breakdown of on-chain metrics, social buzz, and any patterns that suggest the two are linked—can you help me nail that down?\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Inherent dependencies:  \n- All Dex Paprika network-specific calls require an initial getNetworks.  \n- The search→getTokenDetails→getTokenPools chain drives pool selection: search yields tokenAddress for getTokenDetails and getTokenPools; getTokenPools yields poolAddresses for getPoolDetails, getPoolOHLCV, getPoolTransactions.  \n- Reddit:fetch_reddit_hot_threads returns post IDs which feed Reddit:fetch_reddit_post_content.  \n  \nScenario-based dependencies:  \n1. Use getNetworks to confirm the target network (‘ethereum’) before any other network calls.  \n2. Use search output (tokenAddress) to parameterize getTokenDetails and getTokenPools.  \n3. Parse getTokenPools to select the top 3 pools by USD volume – this decision point determines which poolAddresses drive the next three Dex calls (details, OHLCV, transactions).  \n4. Parallel execution: while on-chain data is collected for each pool, simultaneously fetch hot Reddit threads from two subreddits.  \n5. From each subreddit’s hot threads, select the 3 hottest posts (decision point) and fetch detailed comments.  \n6. Cross-server dependency: token symbols and poolAddresses from on-chain data are used to detect mentions in Reddit content – enabling correlation.  \n7. Data flow pattern: sequential chain from search→getTokenPools→per-pool analytics, parallel branch for social data, then a final merge step for correlation analysis.  \n8. Critical decision points: top token pools selection; top posts selection; mention detection for correlation.  \n9. This task cannot be executed without understanding and sequencing these tool dependencies across both Reddit and Dex Paprika servers.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "Context7",
+            "FruityVice",
+            "Huge Icons",
+            "Hugging Face",
+            "Metropolitan Museum",
+            "National Parks",
+            "NixOS",
+            "OKX Exchange",
+            "Scientific Computing"
+          ]
+        }
+      ],
+      "servers": [
+        "Reddit",
+        "DEX Paprika"
+      ],
+      "combination_name": "Social Markets",
+      "combination_type": "two_server_combinations"
+    },
+    {
+      "server_name": "Reddit+DEX Paprika",
+      "tasks": [
+        {
+          "task_id": "reddit_dex_paprika_001",
+          "task_description": "You are an on-chain data analyst tasked with validating and profiling DeFi liquidity pools that are currently trending on Reddit. Execute the following steps in order, without any additional input:\n1. Call DEX Paprika:getStats to retrieve high-level statistics about the DexPaprika ecosystem.\n2. Call DEX Paprika:getNetworks to list all supported blockchain networks.\n3. Call Reddit:fetch_reddit_hot_threads with subreddit=\"cryptocurrency\" and limit=20. From the returned hot threads, identify any thread titles or URLs that contain a DEX Paprika pool page link (pattern “/pool/”). Extract up to 3 unique pool addresses from those links and record the corresponding post_id for each.\n4. For each extracted poolAddress:\n   a. Call DEX Paprika:search with query equal to the poolAddress. If the top result has type=\"pool\", record its network ID; otherwise skip this address.\n   b. Verify that the network ID appears in the list from step 2.\n   c. Call DEX Paprika:getPoolDetails with the verified network and poolAddress.\n   d. Call DEX Paprika:getPoolOHLCV with network, poolAddress, start=\"30 days ago\", limit=30, interval=\"24h\" to fetch daily price history over the past month.\n   e. Call DEX Paprika:getPoolTransactions with network, poolAddress, limit=10 to fetch the ten most recent swaps/adds/removes.\n   f. Call DEX Paprika:getNetworkPools with network, limit=5, sort=\"desc\", orderBy=\"volume_usd\" to retrieve the top five pools by volume on that network.\n   g. Call Reddit:fetch_reddit_post_content with the saved post_id, comment_limit=3, comment_depth=2 to fetch the top 3 comments on the original Reddit thread.\n5. Compile and output a comparative report for each poolAddress containing:\n   • network ID\n   • total volume_usd and liquidity from getPoolDetails\n   • average daily volume over the past 30 days (computed from OHLCV)\n   • count of the 10 most recent transactions\n   • rank of the pool by volume_usd among the network’s top 5 pools\n   • summary of the top 3 Reddit comments (text plus author)\n\nFormat your final output as a JSON array of objects, one per poolAddress, each with keys: network, poolAddress, volume_usd, liquidity_usd, avg_daily_volume_usd, recent_tx_count, rank_among_top5, reddit_comments_summary.",
+          "fuzzy_description": "I’m putting together a DeFi briefing for my trading desk and they’ve been fixated on a few liquidity pools everyone keeps linking in r/cryptocurrency. What I’d love is:\n\nSome high-level health stats on the DEX ecosystem and a quick list of which blockchains it covers, then a scan of the current top 20 hot threads on r/cryptocurrency to spot up to three unique pool page URLs. For each pool address found, can you:\n\n- Double-check it really maps to a live pool on one of the supported chains  \n- Pull its latest total volume and liquidity figures  \n- Fetch its daily price history for the past 30 days and compute the average daily volume  \n- Grab the ten most recent swap/add/remove events  \n- See how it ranks by volume against the top five pools on that same network  \n- And even bring back the first three comments from the original Reddit post for context  \n\nIdeally I’d get back a tidy JSON array where each entry has: network ID, pool address, volume_usd, liquidity_usd, avg_daily_volume_usd, recent_tx_count, rank_among_top5, plus a short summary of those top comments. I really need solid numbers here—no guesswork—so I can show the team hard data in our next meeting.",
+          "dependency_analysis": "1. Initial cross-server validation: getStats and getNetworks (DEX Paprika) establish the universe of networks.  \n2. Reddit to DEX Paprika chain: fetch_reddit_hot_threads yields threads containing pool URLs → extract poolAddress and post_id → input these into DEX Paprika:search.  \n3. Decision point: only proceed with search results whose type==\"pool\"; skip non-pool results.  \n4. Network validation: ensure search result.network matches one of the networks from getNetworks.  \n5. Sequential tool chains per poolAddress: search → getPoolDetails → getPoolOHLCV → getPoolTransactions → getNetworkPools.  \n6. Parallelism: steps 4a–4f can be executed in parallel for each poolAddress, but within each address the order is strict.  \n7. Cross-server parallel fetch: while DEX Paprika profile tools run, separately call fetch_reddit_post_content to enrich on-chain data with Reddit sentiment.  \n8. Data flow dependencies: OHLCV output feeds average-volume calculation; getNetworkPools output enables rank calculation; Reddit content provides qualitative validation.  \n9. The compiled report cross-validates on-chain metrics against social sentiment, leveraging both Reddit and DEX Paprika tools in a unified workflow.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "Call for Papers",
+            "FruityVice",
+            "Huge Icons",
+            "Math MCP",
+            "Medical Calculator",
+            "Metropolitan Museum",
+            "Movie Recommender",
+            "NixOS",
+            "OpenAPI Explorer"
+          ]
+        }
+      ],
+      "servers": [
+        "Reddit",
+        "DEX Paprika"
+      ],
+      "combination_name": "Social Markets",
+      "combination_type": "two_server_combinations"
+    }
+  ],
+  "total_tasks": 0
+}

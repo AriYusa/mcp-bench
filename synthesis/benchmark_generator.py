@@ -57,16 +57,10 @@ class BenchmarkTaskGenerator:
         self.info_collector = MCPServerInfoCollector()
         
         # Initialize LLM provider for TaskSynthesizer
-        from openai import AsyncAzureOpenAI
         from llm.provider import LLMProvider
         import os
         
-        azure_client = AsyncAzureOpenAI(
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version="2024-12-01-preview"
-        )
-        llm_provider = LLMProvider(azure_client, "o4-mini", "azure")
+        llm_provider = LLMProvider("anthropic/claude-sonnet-4-5-20250929")
         
         # TaskSynthesizer only takes llm_provider
         self.synthesizer = TaskSynthesizer(llm_provider)

@@ -225,14 +225,36 @@ install_python_dependencies() {
     cd "$(dirname "$0")"
     
     if [ -f "requirements.txt" ]; then
-        # Use uv if available, fallback to pip
+        # Resolve .venv: prefer project-root venv (one level up), else local, else create
+        VENV_DIR=""
+        if [ -d "../.venv" ]; then
+            VENV_DIR="../.venv"
+            log_info "Using existing project-root .venv: $(realpath $VENV_DIR)"
+        elif [ -d ".venv" ]; then
+            VENV_DIR=".venv"
+            log_info "Using existing local .venv"
+        fi
+
         if command_exists uv; then
-            log_info "Using uv to install Python dependencies..."
-            uv pip install -r requirements.txt
+            if [ -n "$VENV_DIR" ]; then
+                log_info "Using uv to install Python dependencies into $VENV_DIR..."
+                uv pip install --python "$VENV_DIR/bin/python" -r requirements.txt
+            else
+                log_info "No .venv found. Creating one and installing with uv..."
+                uv venv .venv
+                uv pip install --python ".venv/bin/python" -r requirements.txt
+            fi
         else
-            log_info "Using pip to install Python dependencies..."
-            python3 -m pip install --upgrade pip
-            python3 -m pip install -r requirements.txt
+            if [ -n "$VENV_DIR" ]; then
+                log_info "Using pip from $VENV_DIR to install Python dependencies..."
+                "$VENV_DIR/bin/python" -m pip install --upgrade pip
+                "$VENV_DIR/bin/python" -m pip install -r requirements.txt
+            else
+                log_info "No .venv found. Creating one and installing with pip..."
+                python3 -m venv .venv
+                .venv/bin/python -m pip install --upgrade pip
+                .venv/bin/python -m pip install -r requirements.txt
+            fi
         fi
         log_success "Python dependencies installed"
     else
@@ -362,6 +384,15 @@ install_python_server_dependencies() {
     log_info "Installing Python server dependencies..."
     
     cd "$(dirname "$0")"
+
+    # Resolve the project-root .venv to pass explicitly to uv pip install
+    if [ -d "../.venv" ]; then
+        VENV_PYTHON="$(realpath ../.venv)/bin/python"
+    elif [ -d ".venv" ]; then
+        VENV_PYTHON="$(realpath .venv)/bin/python"
+    else
+        VENV_PYTHON=""
+    fi
     
     # List of Python servers
     PYTHON_SERVERS=(
@@ -397,16 +428,16 @@ install_python_server_dependencies() {
                 
                 if command_exists uv; then
                     log_info "Installing unit-converter-mcp dependencies with uv..."
-                    uv pip install fastmcp || log_warning "Failed to install fastmcp"
+                    uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} fastmcp || log_warning "Failed to install fastmcp"
                     if [ -f "pyproject.toml" ]; then
                         log_info "Installing unit-converter-mcp package in editable mode..."
-                        uv pip install -e . || log_warning "uv install failed for unit-converter-mcp"
+                        uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} -e . || log_warning "uv install failed for unit-converter-mcp"
                     fi
                 else
                     log_warning "uv not found, installing unit-converter-mcp dependencies with pip"
-                    python3 -m pip install fastmcp || log_warning "Failed to install fastmcp"
+                    ${VENV_PYTHON:+"$VENV_PYTHON" -m} pip install fastmcp || log_warning "Failed to install fastmcp"
                     if [ -f "pyproject.toml" ]; then
-                        python3 -m pip install -e . || log_warning "pip install failed for unit-converter-mcp"
+                        ${VENV_PYTHON:+"$VENV_PYTHON" -m} pip install -e . || log_warning "pip install failed for unit-converter-mcp"
                     fi
                 fi
             # Special handling for mcp-reddit
@@ -425,16 +456,16 @@ install_python_server_dependencies() {
                 
                 if command_exists uv; then
                     log_info "Installing mcp-reddit dependencies with uv..."
-                    uv pip install redditwarp fastmcp dnspython praw uvicorn hatchling || log_warning "Some dependencies may have failed"
+                    uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} redditwarp fastmcp dnspython praw uvicorn hatchling || log_warning "Some dependencies may have failed"
                     if [ -f "pyproject.toml" ]; then
                         log_info "Installing mcp-reddit package in editable mode..."
-                        uv pip install -e . || log_warning "uv install failed for mcp-reddit"
+                        uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} -e . || log_warning "uv install failed for mcp-reddit"
                     fi
                 else
                     log_warning "uv not found, installing mcp-reddit dependencies with pip"
-                    python3 -m pip install redditwarp fastmcp dnspython praw uvicorn hatchling || log_warning "Some dependencies may have failed"
+                    ${VENV_PYTHON:-python3} -m pip install redditwarp fastmcp dnspython praw uvicorn hatchling || log_warning "Some dependencies may have failed"
                     if [ -f "pyproject.toml" ]; then
-                        python3 -m pip install -e . || log_warning "pip install failed for mcp-reddit"
+                        ${VENV_PYTHON:-python3} -m pip install -e . || log_warning "pip install failed for mcp-reddit"
                     fi
                 fi
             # Special handling for time-mcp
@@ -443,28 +474,28 @@ install_python_server_dependencies() {
                 
                 if command_exists uv; then
                     log_info "Installing time-mcp dependencies with uv..."
-                    uv pip install mcp pydantic tzdata tzlocal || log_warning "Failed to install dependencies"
+                    uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} mcp pydantic tzdata tzlocal || log_warning "Failed to install dependencies"
                     if [ -f "pyproject.toml" ]; then
                         log_info "Installing time-mcp package in editable mode..."
-                        uv pip install -e . || log_warning "uv install failed for time-mcp"
+                        uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} -e . || log_warning "uv install failed for time-mcp"
                     fi
                 else
                     log_warning "uv not found, installing time-mcp dependencies with pip"
-                    python3 -m pip install mcp pydantic tzdata tzlocal || log_warning "Failed to install dependencies"
+                    ${VENV_PYTHON:-python3} -m pip install mcp pydantic tzdata tzlocal || log_warning "Failed to install dependencies"
                     if [ -f "pyproject.toml" ]; then
-                        python3 -m pip install -e . || log_warning "pip install failed for time-mcp"
+                        ${VENV_PYTHON:-python3} -m pip install -e . || log_warning "pip install failed for time-mcp"
                     fi
                 fi
             # Standard installation for other servers
             elif [ -f "uv.lock" ] && command_exists uv; then
                 uv sync 2>/dev/null || log_warning "uv sync failed for $server"
             elif [ -f "pyproject.toml" ] && command_exists uv; then
-                uv pip install -e . 2>/dev/null || log_warning "uv install failed for $server"
+                uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} -e . 2>/dev/null || log_warning "uv install failed for $server"
             elif [ -f "requirements.txt" ]; then
                 if command_exists uv; then
-                    uv pip install -r requirements.txt 2>/dev/null || log_warning "uv pip install failed for $server"
+                    uv pip install ${VENV_PYTHON:+--python "$VENV_PYTHON"} -r requirements.txt 2>/dev/null || log_warning "uv pip install failed for $server"
                 else
-                    python3 -m pip install -r requirements.txt 2>/dev/null || log_warning "pip install failed for $server"
+                    ${VENV_PYTHON:-python3} -m pip install -r requirements.txt 2>/dev/null || log_warning "pip install failed for $server"
                 fi
             fi
             

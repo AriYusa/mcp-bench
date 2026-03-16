@@ -1,0 +1,248 @@
+{
+  "generation_info": {
+    "status": "completed"
+  },
+  "server_tasks": [
+    {
+      "server_name": "Hugging Face+Paper Search+Wikipedia",
+      "tasks": [
+        {
+          "task_id": "hugging_face_paper_search_wikipedia_001",
+          "task_description": "You are a research engineer tasked with identifying and validating the current state-of-the-art text classification model for the AG News dataset, and cross-checking academic performance claims. Follow these steps without asking for more information:\n\n1. Use Hugging Face:search-datasets with query=\"ag news\", limit=5 to find the official AG News dataset ID.\n2. Call Hugging Face:get-dataset-info on the returned dataset_id to confirm it has exactly 4 classes and is in English. If it does not, abort with an error.\n3. Search for pre-trained text classification models fine-tuned on AG News:\n   \u2022 Use Hugging Face:search-models with query=\"ag news\", tags=\"text-classification\", author=\"\" (empty for no filter), limit=5.\n   \u2022 From the search results, select the top three models sorted by their reported evaluation metric F1 score (assume metadata contains a key \"f1\").\n4. For each of the three model_ids, call Hugging Face:get-model-info to retrieve architecture, model size, license, and the reported F1 score in the model card. Discard any model whose license is not an OSI-approved open-source license; if fewer than two remain, expand search-models to limit=10 and repeat selection.\n5. Identify the single Hugging Face model with the highest reported F1 score \u2013 call this Model_HF and record its model_id and F1_HF.\n6. Perform an academic literature search: use Paper Search:search_arxiv with query=\"AG News classification performance\", max_results=5 and select among returned metadata the paper published in the past 3 months with the highest reported F1 (you may inspect each metadata for a \"published\" date and \"f1\" field). Record its arxiv_id and F1_arxiv.\n7. Download and read the paper:\n   \u2022 Call Paper Search:download_arxiv with paper_id=arxiv_id.\n   \u2022 Then call Paper Search:read_arxiv_paper with the same paper_id to extract full text. Parse the extracted text to confirm the F1_arxiv value.\n8. Fetch definitions of evaluation metrics:\n   \u2022 Use Wikipedia:get_summary on title=\"F1 score\" to retrieve an overview of what a micro-averaged F1 score is.\n   \u2022 Use Wikipedia:extract_key_facts on title=\"F1 score\", topic_within_article=\"calculation formula\", count=3 to get the formula and key facts about how F1 is computed from precision and recall.\n9. Decision point \u2013 compare F1_arxiv vs. F1_HF:\n   \u2022 If F1_arxiv > F1_HF + 0.05 (5 percentage points), recommend adopting the academic approach (summarize the key architecture change from the paper) and outline a plan to fine-tune Model_HF using that method.\n   \u2022 Otherwise, recommend deploying Model_HF as is and note that no recent paper outperforms it by more than 5%. Include a brief summary of both performances and link model_id with arxiv_id for traceability.\n\nProvide your final output as a JSON object with:\n  \u2022 \"selected_model\": model_id and F1_HF\n  \u2022 \"paper_reference\": arxiv_id and F1_arxiv\n  \u2022 \"metric_definition_summary\": the summary and key facts from Wikipedia\n  \u2022 \"recommendation\": clear next steps as per the decision point above.",
+          "fuzzy_description": "I\u2019m working on a project where I need to pick the very best news\u2010article classifier out there right now\u2014specifically the one built for that 4-category news dataset (world, sports, business, tech). My boss wants me to find a publicly available, open-source model that has the highest F1 score, and then see if any fresh paper from the last three months has pushed the bar another 5 percentage points higher. \n\nIf a recent research write-up really beats the community model by at least 5 points in F1, I\u2019d like to know what architectural tweak or training trick they used so I can apply it to the top model we found. If not, we\u2019ll just roll with that open-source champion as is. Also, I need a quick, plain-English refresher on what a micro-averaged F1 score actually means and how it\u2019s calculated\u2014got to explain it clearly to stakeholders. \n\nCould you dig into this for me, pull together the model ID and its reported F1, track down any paper from roughly the past three months with its own F1, compare them, and then recommend next steps? Really need solid numbers and clear references so I\u2019m not just guessing. Thanks!\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "This workflow uses a sequential and cross-server dependency chain: \n\n\u2022 Hugging Face search \u2192 fetch \u2192 filter chain: search-datasets \u2192 get-dataset-info \u2192 search-models \u2192 get-model-info feeds model metadata into a selection logic that may loop (expand limit if licenses disqualify models).\n\n\u2022 Decision point after get-dataset-info to validate dataset properties, with abort on mismatch.\n\n\u2022 Cross-server chaining: the selected dataset and model influence query terms in Paper Search:search_arxiv. search_arxiv output (arxiv_id, publication date, reported F1) selects the single paper to pass into download_arxiv \u2192 read_arxiv_paper for text extraction.\n\n\u2022 Wikipedia is used in parallel to the academic pipeline: once F1 metrics are known, Wikipedia:get_summary and Wikipedia:extract_key_facts provide definitions and formulas. These tools run independently of HF and Paper Search but their output is combined in the final recommendation.\n\n\u2022 Critical decision branches:\n   \u2013 If license filtering yields too few models, loop back to expand the search.\n   \u2013 If the paper\u2019s F1 exceeds the top model\u2019s F1 by >5 percentage points, branch to a fine-tuning recommendation; otherwise, branch to a deploy recommendation.\n\n\u2022 Cross-validation: model card F1 vs. paper-reported F1; definitions from Wikipedia to validate metric semantics.\n\n\u2022 The chain cannot proceed to later steps without outputs from prior tools (e.g., cannot search arXiv until HF dataset and model IDs are confirmed). This end-to-end dependency ensures the agent must orchestrate all tools in the specified order.",
+          "distraction_servers": [
+            "BioMCP",
+            "Car Price Evaluator",
+            "Context7",
+            "DEX Paprika",
+            "Game Trends",
+            "Google Maps",
+            "Movie Recommender",
+            "NixOS",
+            "Scientific Computing",
+            "Weather Data"
+          ]
+        }
+      ],
+      "servers": [
+        "Hugging Face",
+        "Paper Search",
+        "Wikipedia"
+      ],
+      "combination_name": "AI Research Hub",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "Hugging Face+Paper Search+Wikipedia",
+      "tasks": [
+        {
+          "task_id": "hugging_face_paper_search_wikipedia_003",
+          "task_description": "You are asked to identify and evaluate the best open-source German\u2192English machine translation model on Hugging Face Hub, cross-validate its reported performance with the primary research paper on arXiv, and enrich your findings with background from Wikipedia and live demos on Hugging Face Spaces. Specifically:\n\n1. Search Hugging Face models with query=\"translation\", tags=\"translation\", author=\"Helsinki-NLP\", limit=5 to retrieve the top 5 German\u2192English translation models.\n2. For each returned model_id, fetch detailed metadata (including published BLEU scores) via get-model-info.\n3. Compare BLEU scores and select the model with the highest BLEU. If the top BLEU < 30, flag that performance is below industry benchmark; otherwise proceed.\n4. Use the selected model\u2019s name in a Paper Search (arXiv) query: query=\"<model_name> BLEU German English translation\", max_results=3. Choose the first result.\n5. Download the chosen arXiv paper PDF and extract its full text. From the text, identify the section discussing evaluation methodology and record the exact reported BLEU score and test set used.\n6. Search Wikipedia for \"Machine translation\" (limit=5), get the summary of the article, then extract key facts (count=3) focused on \"evaluation metrics\" within that article.\n7. Cross-validate: compare the BLEU score and methodology from the arXiv paper with the score reported on Hugging Face. Note any discrepancies in reported test sets or preprocessing steps.\n8. Search Hugging Face Spaces with query=\"<selected_model_id>\", sdk=\"gradio\", limit=3. For each returned space_id, fetch its info and record which language pairs are supported in the demo and whether real-time translation latency is mentioned.\n9. Compile a structured report in JSON with the following fields:\n   - selected_model_id\n   - reported_bleu_hf\n   - reported_bleu_paper\n   - test_set_paper\n   - hf_vs_paper_discrepancy_note\n   - wikipedia_evaluation_facts (array of 3 facts)\n   - demo_spaces (array of objects: {space_id, supported_pairs, latency_mentioned})\n\nAll steps must use only the specified tools and the given concrete values. No external APIs or additional input are allowed.",
+          "fuzzy_description": "Hey, I\u2019m working on a little side project where I need a solid German\u2192English translation model, and I\u2019ve heard the Helsinki team has some of the best open-source options\u2014probably around five main candidates. I\u2019d love to figure out which one actually tops the leaderboard in terms of BLEU score on the model hub, then dig into the team\u2019s original pre-print to see what BLEU they reported there and exactly which test set they used. I\u2019m also a bit fuzzy on how translation quality is typically measured\u2014could you pull out three key facts about evaluation metrics from that big online encyclopedia article on machine translation? And one more thing: are there any community-run live demos for the model that wins? I\u2019d like to know what language pairs they support and whether they mention any real-time latency numbers. I\u2019m putting together a report for my manager, so I really need the exact BLEU figures, test-set names, and solid source references\u2014no just gut feelings. Thanks!",
+          "dependency_analysis": "This task weaves a deep, sequential and cross-server dependency chain:\n\n1. Hugging Face model discovery chain:\n   - search-models \u2192 produces model_id list \u2192 get-model-info \u2192 yields BLEU scores. (inherent search\u2192fetch pattern)\n   - Decision point: compare BLEU scores to choose top model or flag low performance.\n\n2. Cross-server branching:\n   - Paper Search (arXiv) input is parametrized by the selected model_name from get-model-info.\n   - search_arxiv \u2192 download_arxiv \u2192 read_arxiv_paper \u2192 yields evaluation section text and BLEU/test-set details.\n\n3. Wikipedia enrichment in parallel to validating metrics:\n   - search_wikipedia \u2192 get_summary \u2192 extract_key_facts (topic_within_article=\"evaluation metrics\", count=3).\n\n4. Demo validation chain on Hugging Face Spaces:\n   - search-spaces \u2192 takes selected_model_id as query \u2192 get-space-info \u2192 yields supported_pairs and latency data.\n\n5. Cross-validation decision logic:\n   - Compare hf reported_bleu vs. paper reported_bleu and test_set; if mismatch, note discrepancy. Combines outputs from HF and Paper Search.\n\n6. Parallel vs. sequential:\n   - Steps 1\u21923 are sequential (HF search\u2192select\u2192arXiv search\u2192download\u2192read).\n   - Step 6 (Wikipedia) and step 7 (Spaces) can run in parallel after model selection but both feed into final report.\n\n7. Data flows and transformation:\n   - Model info output sets parameters for arXiv and Spaces queries.\n   - PDF text is parsed to extract specific metrics (requires content parsing logic).\n\n8. Cross-server dependencies ensure the agent must integrate HF Hub data, academic paper data, and community documentation (Wikipedia) to produce a unified, validated evaluation report.",
+          "distraction_servers": [
+            "Car Price Evaluator",
+            "Math MCP",
+            "Metropolitan Museum",
+            "NASA Data",
+            "National Parks",
+            "OKX Exchange",
+            "OSINT Intelligence",
+            "OpenAPI Explorer",
+            "Unit Converter",
+            "Weather Data"
+          ]
+        }
+      ],
+      "servers": [
+        "Hugging Face",
+        "Paper Search",
+        "Wikipedia"
+      ],
+      "combination_name": "AI Research Hub",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "Metropolitan Museum+Huge Icons+Wikipedia",
+      "tasks": [
+        {
+          "task_id": "metropolitan_museum_huge_icons_wikipedia_000",
+          "task_description": "Create a React-based digital exhibit overview featuring three artifacts from the Met\u2019s Egyptian Art department. 1) Call list-departments to locate the department whose name contains \u201cEgyptian Art.\u201d 2) Use the resulting departmentId to call search-museum-objects with q=\"Egyptian\", hasImages=true, departmentId=<id>. If fewer than three objects are returned, repeat search-museum-objects with title=true, q=\"Sarcophagus\", hasImages=true, departmentId=<id>. 3) For the top three objectIds, call get-museum-object(objectId, returnImage=true) to retrieve title, objectName, classification, and image URL. 4) For each artifact\u2019s title or classification, call search_wikipedia(query=<classification or title>) and take the first match. 5) Call get_summary(title=<article>) and measure its length: if over 200 characters, call summarize_article_section(title=<article>, section_title=\"Overview\", max_length=150); if under 200, call summarize_article_for_query(title=<article>, query=<classification>, max_length=250). 6) Call extract_key_facts(title=<article>, topic_within_article=<classification>, count=5). 7) In parallel, call list_icons to retrieve all available icon names. For each artifact\u2019s classification, call search_icons(query=<classification>) and select up to two icons; if none found, fallback to search_icons(query=\"museum,artifact\"). Validate each found icon against the list_icons result. 8) Finally, call get_platform_usage(platform=\"react\") to obtain React integration code snippets. 9) Produce a combined JSON report listing each artifact\u2019s id, title, image URL, summary, key facts, chosen icons, and React usage sample.",
+          "fuzzy_description": "I\u2019m working on a little side project at my company where I\u2019m using React to build a digital showcase for the Met\u2019s Egyptian Art collection. I need to feature three objects that have good images\u2014if you can\u2019t find enough under the broad \u201cEgyptian Art\u201d label, feel free to focus on some famous sarcophagi instead. For each piece, I\u2019d love the official title and classification, a crisp intro (around 150\u2013200 words max), plus about five key tidbits or facts. It\u2019d also be great to pair each artifact with one or two icons that match its classification\u2014if nothing obvious shows up, just grab some generic museum or artifact icons. Finally, could you include a short React code snippet that demonstrates how to feed this data into a component? And please make sure everything is pulled straight from the Met\u2019s own collection metadata or equally solid sources, since I\u2019ll need real records to back up my demo. Thanks!\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Step 1\u21922: list-departments supplies departmentId for search-museum-objects. Decision: if search returns <3, branch to a second search-museum-objects call with title=true. Step 2\u21923: search-museum-objects yields objectIds consumed by get-museum-object. Step 3\u21924: each artifact\u2019s title/classification feeds search_wikipedia. Step 4\u21925: get_summary result length drives conditional calls to summarize_article_section or summarize_article_for_query. Step 5\u21926: summaries and classification feed extract_key_facts. Parallel chain: list_icons \u2192 search_icons for each classification \u2192 validation against list_icons, with fallback query if empty. Final consolidation: get_platform_usage(react) combines with artifacts and icons data. Cross-server dependencies: Met data (classification) drives Wikipedia and Huge Icons queries; icon search results are cross-validated against list_icons; React usage ties icon data back into the UI context.",
+          "distraction_servers": [
+            "BioMCP",
+            "DEX Paprika",
+            "FruityVice",
+            "Google Maps",
+            "Math MCP",
+            "Medical Calculator",
+            "NixOS",
+            "OSINT Intelligence",
+            "Reddit",
+            "Unit Converter"
+          ]
+        }
+      ],
+      "servers": [
+        "Metropolitan Museum",
+        "Huge Icons",
+        "Wikipedia"
+      ],
+      "combination_name": "Creative Resources",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "Metropolitan Museum+Huge Icons+Wikipedia",
+      "tasks": [
+        {
+          "task_id": "metropolitan_museum_huge_icons_wikipedia_001",
+          "task_description": "Compile an interactive report on five \u2018Impressionism\u2019 paintings from the European Paintings department of the Metropolitan Museum of Art. First, list all museum departments and identify the ID for \u201cEuropean Paintings.\u201d Use that ID to search for objects with the keyword \u201cImpressionism\u201d that have images, and select the first five results. For each object, retrieve its full details and extract the artist\u2019s name and the primary medium classification. Then, for each artist, search Wikipedia to find their article, get a concise summary, and extract three key facts that confirm their association with Impressionism. If the summary does not mention \u201cImpressionism,\u201d flag it. Next, for each painting\u2019s medium (e.g., \u201cOil on canvas\u201d), search Huge Icons for matching icon tags and retrieve the React usage instructions for the top icon found. Finally, produce a JSON report listing, for each painting: object ID, title, image URL, artist name, artist Wikipedia summary, three key facts, Impressionism confirmation flag, chosen icon name, and the React code snippet for embedding that icon.",
+          "fuzzy_description": "Hey, I\u2019m building an interactive gallery page for an art history class and want to feature about five Impressionist paintings from the Met. I\u2019m honestly a bit lost on where to start: I figure I need to find the European Paintings section on their website, grab its ID, and then hunt down Impressionism works that actually have images. For each painting, I\u2019d love to pull together its title, image URL, the artist\u2019s name, and what medium they used. Then I\u2019d like a short Wikipedia bio snippet that specifically mentions why they\u2019re considered Impressionists\u2014maybe three solid facts, or at least a flag if it doesn\u2019t come up. On top of that, I want to pair each medium with a small icon and get the React code snippet so I can drop it straight into my app. Could you wrap all of that into a clean JSON bundle I can import? I really need real, sourced info, not guesses, since I\u2019m presenting next week.\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Key tool chains and data flow: Sequential flow begins with Metropolitan Museum:list-departments \u2192 Metropolitan Museum:search-museum-objects \u2192 Metropolitan Museum:get-museum-object. The department ID from list-departments sets the departmentId for search-museum-objects. The top five objectIds feed get-museum-object calls. Each get-museum-object output yields artist name and medium classification. That artist name parameterizes Wikipedia:search_wikipedia \u2192 Wikipedia:get_summary \u2192 Wikipedia:extract_key_facts. The presence of the term \u201cImpressionism\u201d in the summary informs a confirmation flag (decision point). The medium classification then parameterizes Huge Icons:search_icons \u2192 Huge Icons:get_platform_usage (React). Critical decision points: if artist summary lacks \u201cImpressionism,\u201d mark flag; if search_icons returns no results, default to an \u201cart\u201d icon. Parallel requirements: Wikipedia calls for each artist and Huge Icons calls for each medium can run concurrently but their outputs must be merged per painting. Cross-server dependencies: Met Museum data (medium classification) drives Huge Icons queries; Wikipedia validation confirms Met Museum content; Huge Icons React usage complements the art data. The task demands deep dependency chains, iterative item-level processing, conditional flagging, parallel data enrichment, and cross-server data fusion.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "BioMCP",
+            "Car Price Evaluator",
+            "DEX Paprika",
+            "FruityVice",
+            "Google Maps",
+            "National Parks",
+            "OSINT Intelligence",
+            "OpenAPI Explorer",
+            "Paper Search"
+          ]
+        }
+      ],
+      "servers": [
+        "Metropolitan Museum",
+        "Huge Icons",
+        "Wikipedia"
+      ],
+      "combination_name": "Creative Resources",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "Medical Calculator+Wikipedia+FruityVice",
+      "tasks": [
+        {
+          "task_id": "medical_calculator_wikipedia_fruityvice_000",
+          "task_description": "You are preparing a comprehensive pre-operative and cardiovascular risk assessment and management plan for a 65-year-old female patient scheduled for elective hip replacement. All data are provided below. Execute the following sequence: 1) Calculate BMI and BSA for weight 85 kg and height 165 cm. 2) Calculate IBW and ABW for actual weight 85 kg and height 65 inches (female). 3) Compute Cockcroft-Gault creatinine clearance using age 65, weight 85 kg, height 65 inches, serum creatinine 1.2 mg/dL, female. 4) Compute eGFR using CKD-EPI creatinine-cystatin C (scr 1.2 mg/dL, scys 1.3 mg/L, age 65, female) and also eGFR using CKD-EPI creatinine only (scr 1.2, age 65, female). 5) Compare the two eGFR values\u2014if they differ by more than 5 mL/min/1.73 m\u00b2, select the lower eGFR for drug-dosing decisions. 6) Calculate corrected serum sodium for measured sodium 130 mEq/L and serum glucose 280 mg/dL. 7) Calculate corrected serum calcium for measured calcium 8.2 mg/dL and albumin 2.8 g/dL (normal albumin 4.0 g/dL). 8) Compute Child-Pugh score with bilirubin 2.0 mg/dL, albumin 2.8 g/dL, INR 1.5, ascites \u201cslight,\u201d encephalopathy grade 1. 9) Compute MELD-3.0 score with age 65, female true, bilirubin 2.0, INR 1.5, creatinine 1.2, albumin 2.8, sodium 132 mEq/L, dialysis false. 10) Calculate HOMA-IR using fasting insulin 18 uIU/mL and fasting glucose 150 mg/dL. 11) Compute Framingham 10-year CHD risk with age 65, total cholesterol 220 mg/dL, HDL 50 mg/dL, systolic BP 145 mmHg, treated for BP true, smoker true, gender \u201cfemale.\u201d 12) Compute PREVENT 10-year CVD risk with age 65, female true, tc 220 mmol/L, hdl 50 mmol/L, sbp 145 mmHg, diabetes true, current_smoker true, egfr (from step 5), using_antihtn true, using_statins false. 13) Compare Framingham vs PREVENT risks; if PREVENT exceeds Framingham by >2%, search Wikipedia for \u201cdifferences between Framingham and PREVENT cardiovascular risk models,\u201d get the top-3 summary points. 14) Compute CHA\u2082DS\u2082-VASc score with age 65, female true, CHF false, hypertension true, stroke_history false, vascular_disease true, diabetes true. 15) Compute Revised Cardiac Risk Index with high_risk_surgery true, ischemic_heart_disease false, congestive_heart_failure false, cerebrovascular_disease false, insulin_treatment true, creatinine_over_2mg false. 16) Compute Wells PE score with clinical_signs_dvt false, alternative_diagnosis_less_likely true, heart_rate_over_100 false, immobilization_or_surgery true, previous_dvt_or_pe false, hemoptysis false, malignancy false. 17) Calculate QTc by Bazett formula with QT interval 400 ms and heart rate 78 bpm. 18) Calculate total daily MME for oxycodone 10 mg per dose, 4 doses per day. 19) Convert prednisone 20 mg to dexamethasone equivalent. 20) If PREVENT risk >20%, search Wikipedia for \u201chigh-intensity statin therapy recommendations,\u201d retrieve article summary, and extract the top-5 key recommendations. Summarize all results with interpretation notes for surgical clearance and perioperative medication planning.",
+          "fuzzy_description": "Hey, I\u2019m working on getting pre-op clearance for a 65-year-old woman who\u2019s due for an elective hip replacement, and I\u2019m a bit swamped trying to tie together all her numbers and risk scores so I can make the right calls on meds and timing. She\u2019s 85 kg and about 165 cm tall (roughly 65 inches), so I want to know her BMI, BSA and what her ideal versus adjusted body weight would be. Her serum creatinine is 1.2 mg/dL and cystatin C is 1.3 mg/L\u2014could you run Cockcroft-Gault and CKD-EPI both with and without cystatin C and let me know if they differ by more than 5 mL/min/1.73 m\u00b2 (and if so, which value I should use for dosing)? She\u2019s also got sodium of 130 mEq/L with glucose 280 mg/dL, plus calcium 8.2 mg/dL and albumin 2.8 g/dL (normal albumin 4.0), so I need corrected sodium and calcium, too. On the liver side she has bilirubin 2.0 mg/dL, albumin 2.8 g/dL, INR 1.5, slight ascites and grade 1 encephalopathy\u2014what\u2019s her Child-Pugh and MELD-3.0 (sodium 132 mEq/L, not on dialysis)? Metabolically, her fasting insulin is 18 \u00b5IU/mL and glucose 150 mg/dL\u2014can you get her HOMA-IR? For cardiovascular risk I\u2019d like her 10-year Framingham score (age 65, TC 220 mg/dL, HDL 50 mg/dL, SBP 145 mmHg on treatment, smoker, female) and a PREVENT 10-year CVD risk using TC 220 mmol/L, HDL 50 mmol/L, SBP 145 mmHg, diabetic, current smoker, on antihypertensives, not on statins, plus whichever eGFR we decide. If PREVENT is more than 2% higher than Framingham, could you summarize the top three differences between those two models? While you\u2019re at it, what are her CHA\u2082DS\u2082-VASc (she\u2019s 65, female, hypertension, vascular disease, diabetes) and Revised Cardiac Risk Index (high-risk surgery, on insulin) scores, and a Wells score for PE given her upcoming surgery? I also need her QTc by Bazett\u2019s formula (QT 400 ms, HR 78 bpm), total daily MME if she\u2019s on oxycodone 10 mg four times a day, and a prednisone-to-dexamethasone equivalent for 20 mg of prednisone. Finally, if that PREVENT risk is above 20%, could you pull the top five high-intensity statin therapy recommendations from Wikipedia? I really need the actual numbers and a few brief interpretation notes so I can present solid, evidence-based planning to the team.",
+          "dependency_analysis": "1) Anthropometric chain: bmi_bsa_calculator\u2192ibw_abw_calculator uses weight and height. 2) Renal function chain: crcl_cockcroft_gault and both egfr_epi_cr_cys & egfr_epi share scr, age, sex (and scys) inputs. Branch: compare two eGFR outputs, decision point selects lower for dosing. 3) Electrolyte corrections: corrected_sodium uses glucose from patient data and measured sodium; corrected_calcium uses albumin and calcium. 4) Hepatic function: child_pugh_score and meld_3 both consume bilirubin, albumin, inr plus specific fields; sequential but parallel. 5) Metabolic chain: homa_ir uses fasting insulin and glucose. 6) Cardiovascular risk chain: framingham_risk_score and prevent_cvd_risk both consume age, lipid, BP, sex, smoking, diabetes, and require egfr from step 5. Decision: compare two risk models; if discrepancy triggers Wikipedia search. 7) Cross-server: PREVENT output >2% above Framingham triggers Wikipedia:search_wikipedia\u2192get_summary. Later, PREVENT risk >20% triggers further Wikipedia:search_wikipedia\u2192get_summary\u2192extract_key_facts. 8) Thromboembolism: chads2_vasc_score and wells_pe_criteria execute in parallel for AF stroke vs PE risk. 9) QT interval chain: qtc_calculator uses QT and HR. 10) Pain/sedation chain: calculate_mme for opioid dosing; steroid_conversion for steroid planning. 11) Sequential dependencies: outputs from steps 2\u20135 feed into step 12; step 12 and 11 feed into decision at step 13; step 13 and step 12 decisions direct cross-server workflows. 12) Critical decision points: eGFR comparison (>5 mL/min), risk model discrepancy (>2%), high-risk threshold (>20%). 13) Parallel vs sequential: most calculators run parallel after initial anthropometry; risk models must follow renal metrics. 14) Cross-server: Medical Calculator data (egfr, risks) controls Wikipedia queries and summaries for guideline retrieval.",
+          "distraction_servers": [
+            "BioMCP",
+            "DEX Paprika",
+            "Google Maps",
+            "Huge Icons",
+            "Metropolitan Museum",
+            "NASA Data",
+            "National Parks",
+            "OKX Exchange",
+            "Reddit",
+            "Scientific Computing"
+          ]
+        }
+      ],
+      "servers": [
+        "Medical Calculator",
+        "Wikipedia",
+        "FruityVice"
+      ],
+      "combination_name": "Health Advisor",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "Medical Calculator+Wikipedia+FruityVice",
+      "tasks": [
+        {
+          "task_id": "medical_calculator_wikipedia_fruityvice_001",
+          "task_description": "You are evaluating a 68-year-old male patient for cardiovascular risk, renal function, and metabolic electrolyte corrections. All input data are provided below and no further information is needed. Perform the following steps in sequence:\n\n1. Calculate kidney function:\n   a. Use egfr_epi with scr=1.5 mg/dL, age=68, male=true.\n   b. Use egfr_epi_cr_cys with scr=1.5 mg/dL, scys=1.2 mg/L, age=68, male=true.\n   c. Compare the two eGFR values. If the CKD-EPI creatinine-cystatin C eGFR differs by more than 5 mL/min/1.73 m\u00b2 from the creatinine-only eGFR, select the lower value; otherwise select the average.\n\n2. Calculate metabolic corrections in parallel:\n   a. Use corrected_sodium with measured_sodium=130 mEq/L and serum_glucose=300 mg/dL.\n   b. Use corrected_calcium with serum_calcium=8.0 mg/dL and patient_albumin=2.5 g/dL.\n\n3. Calculate cardiovascular risk scores:\n   a. Use prevent_cvd_risk with age=68, female=false, tc=5.5 mmol/L, hdl=1.0 mmol/L, sbp=140 mmHg, diabetes=false, current_smoker=false, egfr=<selected eGFR>, using_antihtn=true, using_statins=false.\n   b. Use framingham_risk_score with age=68, total_cholesterol=213 mg/dL, hdl_cholesterol=39 mg/dL, systolic_bp=140 mmHg, treated_for_bp=true, smoker=false, gender=\"male\".\n\n4. Evaluate atrial fibrillation stroke risk (conditional):\n   The patient has non-valvular atrial fibrillation. Use chads2_vasc_score with age=68, female=false, chf=false, hypertension=true, stroke_history=false, vascular_disease=false, diabetes=false.\n\n5. Decision points and cross-validation:\n   a. Compare the 10-year CVD risk from PREVENT and Framingham. If both exceed 20%, search Wikipedia for \u201cPrimary prevention statin guidelines 10-year cardiovascular risk\u201d and get a summary of at least 150 words.\n   b. If CHA\u2082DS\u2082-VASc score \u2265 2, search Wikipedia for \u201cCHA\u2082DS\u2082-VASc stroke prevention management\u201d and retrieve a 150-word summary of guideline recommendations.\n\n6. Compile a final report in JSON format containing:\n   - egfr_epi_value (float)\n   - egfr_epi_cr_cys_value (float)\n   - selected_egfr (float)\n   - corrected_sodium (dict)\n   - corrected_calcium (dict)\n   - prevent_cvd_10yr_risk (dict)\n   - framingham_10yr_risk (float)\n   - chads2_vasc_score (int)\n   - statin_guidelines_summary (string, if triggered)\n   - af_stroke_prevention_summary (string, if triggered)\n\nThis task must be executed exactly as specified, using only the provided tools in the given order, and the output must follow the defined JSON schema without asking for further inputs.",
+          "fuzzy_description": "Hey, I\u2019m working up a 68-year-old man and could use some help pulling together all his numbers and guideline info. He\u2019s got a serum creatinine of 1.5 mg/dL and cystatin C of 1.2 mg/L, so I want to see his eGFR by both the creatinine-only and the creatinine-cystatin equations, then choose the lower one if they differ by more than 5 mL/min/1.73 m\u00b2 (or average them if they\u2019re close). His sodium is 130 mEq/L but his glucose is about 300 mg/dL, and his calcium is 8.0 mg/dL with albumin at 2.5 g/dL\u2014so I need the corrected values for those. Next, I\u2019d like two 10-year cardiovascular risk estimates: one using his total cholesterol 5.5 mmol/L (213 mg/dL), HDL 1.0 mmol/L (39 mg/dL), treated systolic BP 140 mmHg, no diabetes, non-smoker, on antihypertensives but not on statins, and our chosen eGFR; and the Framingham model with the same age, lipids, BP (treated), and smoking status. If both risks exceed 20%, I need about a 150-word summary of primary prevention statin guidelines. He also has non-valvular atrial fibrillation, so with his CHA\u2082DS\u2082-VASc factors (68 years, male, no CHF, yes hypertension, no prior stroke, no vascular disease, no diabetes) I need that score\u2014and if it\u2019s \u2265 2, a 150-word summary of stroke prevention management. Could you package everything into JSON\u2014each eGFR, the selected eGFR, corrected sodium and calcium, the two risk outputs, the CHA\u2082DS\u2082-VASc score, and any guideline text that gets triggered? I really need the hard numbers and concise guideline excerpts to share with my team. Thanks!\n\nPlease ensure all findings are supported by concrete data and verifiable sources. I need specific numbers and evidence, not generalizations.",
+          "dependency_analysis": "Inherent tool chains:\n- egfr_epi and egfr_epi_cr_cys both compute eGFR; their outputs feed into prevent_cvd_risk as the \u2018egfr\u2019 parameter.\n- corrected_sodium and corrected_calcium are independent metabolic correction calculators that run in parallel.\n- prevent_cvd_risk and framingham_risk_score both produce 10-year cardiovascular risk estimates for cross-validation.\n- chads2_vasc_score is used conditionally when atrial fibrillation is present.\n- Wikipedia tools (search_wikipedia \u2192 get_summary) form a standard workflow: clinical results determine the query, then summary is fetched.\n\nScenario-based dependencies and decision points:\n- Step 1(c): branching logic selects which eGFR to pass forward based on the numeric difference.\n- Step 4: conditional execution of chads2_vasc_score only if AF is present.\n- Step 5(a): if both CVD risk tools exceed a 20% threshold, trigger a Wikipedia search for statin guidelines, else skip.\n- Step 5(b): if CHA\u2082DS\u2082-VASc score \u2265 2, trigger a separate Wikipedia search for stroke prevention guidelines.\n\nParallel vs sequential:\n- Kidney function calculators (egfr) run sequentially but branch logic determines the next action.\n- Electrolyte corrections run in parallel, independent of one another.\n- Risk calculators run in parallel once eGFR is selected.\n- Wikipedia calls occur sequentially after decision points.\n\nCross-server dependencies:\n- Medical Calculator outputs (egfr, risk scores) dictate the parameters and queries for Wikipedia searches.\n- Clinical thresholds from Medical Calculator trigger cross-server queries to Wikipedia for guideline summaries.\n\nThis complex, self-contained task cannot be completed without understanding how each calculator\u2019s output feeds into the next step and triggers conditional searches in Wikipedia.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "Car Price Evaluator",
+            "Game Trends",
+            "Google Maps",
+            "Math MCP",
+            "National Parks",
+            "NixOS",
+            "OSINT Intelligence",
+            "Scientific Computing",
+            "Unit Converter"
+          ]
+        }
+      ],
+      "servers": [
+        "Medical Calculator",
+        "Wikipedia",
+        "FruityVice"
+      ],
+      "combination_name": "Health Advisor",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "OpenAPI Explorer+Paper Search+Hugging Face",
+      "tasks": [
+        {
+          "task_id": "openapi_explorer_paper_search_hugging_face_000",
+          "task_description": "Analyze and compare the authentication and security schemes of the \"openai\" and \"github\" OpenAPI specifications. Use the following workflow:\n\n1. Call OpenAPI Explorer:getApiOverview with id=\"openai\" and id=\"github\" to extract each spec\u2019s list of security schemes.\n2. Compare the two lists to identify which schemes (e.g., apiKey, OAuth2 flows, bearerAuth) appear in each spec and which are unique or missing.\n3. If the GitHub spec includes an OAuth2 flow that the OpenAI spec lacks, set query=\"OAuth2 security in REST APIs best practices\"; otherwise set query=\"API key security in REST APIs best practices\".\n4. Call Paper Search:search_arxiv with the chosen query and max_results=5. If fewer than 3 results are returned, call Paper Search:search_pubmed with the same query and max_results=5.\n5. From the first 3 papers returned by the primary source (arXiv, or PubMed if fallback), extract their titles and abstracts from the metadata.\n6. Independently, call Hugging Face:search-models with query=\"API security\" and limit=5 to find relevant ML models.\n7. For the top 2 model_ids returned, call Hugging Face:get-model-info to retrieve detailed model descriptions and capabilities.\n8. Compile a JSON report with three top-level sections:\n   \u2022 \"security_comparison\": list of security schemes present in OpenAI vs GitHub and identified gaps.\n   \u2022 \"academic_summary\": an array of objects {\"title\":\u2026, \"abstract\":\u2026} for the selected 3 papers.\n   \u2022 \"ml_models\": an array of the two models\u2019 detailed info from Hugging Face:get-model-info.\n\nThe agent should execute this sequence without further input and output the final report in JSON.",
+          "fuzzy_description": "Hey, I\u2019ve been working on a project that ties together an AI chat service API and a code-hosting API, and I\u2019m kind of lost in all their auth setups. I see mentions of API keys, bearer tokens, OAuth flows, and I can\u2019t quite tell which method each one really uses or where there might be gaps if I try to standardize our security layer. \n\nCould you look into both and give me a clear comparison of their auth schemes\u2014what they share, what\u2019s unique to each, and where one might offer OAuth2 that the other doesn\u2019t (or vice versa)? \n\nThen, based on what you find, I\u2019d like to dive into some academic best practices: if there\u2019s an OAuth2 flow in the code-hosting API that the chat API lacks, point me to three recent papers on OAuth2 security; otherwise, send over three studies on API key security. I\u2019d need the titles and abstracts so I can actually read up on them.\n\nFinally, I\u2019m considering bolting on some ML-driven security checks\u2014can you find a couple of machine-learning models focused on API security and give me a quick rundown of their capabilities? \n\nI really need solid evidence\u2014real paper abstracts, model details, concrete info\u2014because I\u2019ll be presenting this to my boss. Does that make sense?",
+          "dependency_analysis": "1. Sequential dependency: Use OpenAPI Explorer:getApiOverview twice (for \"openai\" and \"github\") to produce two security-scheme lists. 2. Decision point: Compare the two lists; if GitHub includes OAuth2 and OpenAI does not, choose the OAuth2 query; otherwise choose the API key query. 3. Conditional workflow: Primary academic search via Paper Search:search_arxiv; if its result count <3, fallback to Paper Search:search_pubmed. 4. Data flow: The selected query string (from step 2) is passed to Paper Search tools. 5. Inherent dependency: search_arxiv (or search_pubmed) outputs paper metadata containing titles and abstracts ready for summarization\u2014no additional tools needed to extract abstracts. 6. Parallel independent branch: Use Hugging Face:search-models with fixed query \"API security\"; its output provides model_ids for the next step. 7. Sequential dependency: For the top 2 model_ids, call Hugging Face:get-model-info. 8. Cross-server orchestration: Data from OpenAPI Explorer influences Paper Search queries; Paper Search outputs trigger or skip fallback logic; Hugging Face tools run in parallel and feed into the final aggregation. 9. Final aggregation: Combine outputs from all three servers into one structured JSON report.",
+          "distraction_servers": [
+            "Bibliomantic",
+            "Car Price Evaluator",
+            "Context7",
+            "FruityVice",
+            "Game Trends",
+            "Math MCP",
+            "Movie Recommender",
+            "Scientific Computing",
+            "Unit Converter",
+            "Weather Data"
+          ]
+        }
+      ],
+      "servers": [
+        "OpenAPI Explorer",
+        "Paper Search",
+        "Hugging Face"
+      ],
+      "combination_name": "API Research Platform",
+      "combination_type": "three_server_combinations"
+    },
+    {
+      "server_name": "OpenAPI Explorer+Paper Search+Hugging Face",
+      "tasks": [
+        {
+          "task_id": "openapi_explorer_paper_search_hugging_face_001",
+          "task_description": "Audit the OpenAPI specifications for both the \u201copenai\u201d and \u201cgithub\u201d APIs to identify validation errors and security\u2010scheme inconsistencies, then cross\u2010validate against published best practices. 1. Use OpenAPI Explorer:getApiOverview with id=\"openai\" to retrieve the overall structure of the OpenAI spec. 2. Immediately feed id=\"openai\" into swagger-validator to validate the spec and collect all errors/warnings. 3. For each validation error that references an operationId or route, call OpenAPI Explorer:getApiOperation with id=\"openai\" and the operationIdOrRoute from the error to extract full request and response schemas. 4. Repeat steps 1\u20133 for id=\"github\". 5. Use Paper Search:search_arxiv with query=\"OAuth2 API security best practices\" and max_results=3 to find recent academic guidance. 6. For each returned paper_id, call Paper Search:read_arxiv_paper with that paper_id to extract text content and summarize the top five OAuth2 security recommendations. 7. Use Hugging Face:search-collections with query=\"API specification best practices\" and limit=1 to locate a community\u2010curated guideline set. 8. Call Hugging Face:get-collection-info with the namespace and collection_id returned to extract formal recommendations on versioning, schema consistency, deprecation policies, and authentication schemes. 9. Aggregate validation errors from both specs, map missing or misconfigured security schemes (API key vs OAuth2) against the five arXiv guidelines and the Hugging Face collection recommendations. 10. Produce a JSON report with these fields: { \"spec_name\": [\"openai\",\"github\"], \"validation_errors\": {...}, \"operations_missing_oauth2\": [...], \"academic_guidelines_summary\": [...], \"community_recommendations\": {...}, \"mismatches\": [...], \"action_items\": [...] }. The agent should execute this end\u2010to\u2010end without requesting further input.",
+          "fuzzy_description": "I\u2019m working on a project that ties together two external services\u2014one for AI features and one for code hosting\u2014and my boss wants a thorough health check on their published API docs. I\u2019m not totally confident the schemas are error-free or that every endpoint is using the right kind of authentication (API key vs. OAuth2), and I\u2019ve heard there are some new best practices floating around in both academic papers and community guides. \n\nCould you take a careful look at each service\u2019s official API description, surface any validation glitches or security-scheme oddities\u2014like endpoints that aren\u2019t actually protected by OAuth when they should be\u2014and then see how those issues line up with the latest OAuth2 recommendations from a handful of recent research papers plus a well-known community-maintained guideline? I\u2019d love a concise breakdown of:\n\n- What errors or warnings you find in each spec\n- Which operations are missing or misconfiguring OAuth2\n- The top security recommendations from the academic side\n- The key dos and don\u2019ts from the community guide\n- A clear set of action items for us to fix all the mismatches\n\nI really need concrete examples and sources\u2014quotable snippets or direct references\u2014so I can justify every point when I report back. Does that make sense?",
+          "dependency_analysis": "Inherent dependencies: getApiOverview \u2192 swagger-validator \u2192 conditional getApiOperation. The spec id flows into the validator, whose output errors reference operationIds that drive calls to getApiOperation. Parallel chains: one for \u201copenai\u201d, one for \u201cgithub\u201d. Paper Search chain: search_arxiv produces paper_ids \u2192 read_arxiv_paper consumes those IDs \u2192 yields guideline text. Hugging Face chain: search-collections produces namespace+collection_id \u2192 get-collection-info consumes them \u2192 yields community best practices. Cross\u2010server dependencies: the security\u2010scheme issues and validation errors from OpenAPI Explorer+swagger-validator are cross\u2010validated against arXiv guidelines (Paper Search) and Hugging Face community recommendations. Decision points: if swagger-validator returns errors, drill down with getApiOperation; collect all errors before moving to best\u2010practice extraction. The final report merges all findings and recommendations into one JSON output.",
+          "distraction_servers": [
+            "Car Price Evaluator",
+            "Medical Calculator",
+            "Movie Recommender",
+            "NASA Data",
+            "National Parks",
+            "OKX Exchange",
+            "OSINT Intelligence",
+            "Reddit",
+            "Scientific Computing",
+            "Wikipedia"
+          ]
+        }
+      ],
+      "servers": [
+        "OpenAPI Explorer",
+        "Paper Search",
+        "Hugging Face"
+      ],
+      "combination_name": "API Research Platform",
+      "combination_type": "three_server_combinations"
+    }
+  ],
+  "total_tasks": 0
+}

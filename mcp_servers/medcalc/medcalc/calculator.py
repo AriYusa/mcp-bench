@@ -3437,7 +3437,7 @@ def framingham_risk_score(
             coeff["smoker"] * smoker +
             coeff["ln_age_ln_total_chol"] * ln_age * ln_total_chol +
             coeff["ln_age_smoker"] * ln_age_smoker +
-            coeff["ln_age_ln_age"] * ln_age ** 2 +
+            (coeff.get("ln_age_ln_age", 0) * ln_age ** 2) +
             coeff["intercept"])
 
         # Calculate probability of a heart attack using the equation

@@ -6,11 +6,12 @@ including execution compliance analysis, LLM performance assessment, and tool ac
 """
 
 import asyncio
+import json
 import logging
 import random
 import time
-from typing import List, Dict, Any, Optional, Protocol
-from collections import Counter
+from typing import List, Dict, Any, Optional, Protocol, Type
+from collections import Counter, defaultdict
 from abc import ABC, abstractmethod
 import jsonschema
 from jsonschema import ValidationError
@@ -26,9 +27,19 @@ def safe_get(item, key, default=None):
         return default
 class LLMProvider(Protocol):
     """Protocol for LLM providers used in evaluation"""
-    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    async def get_completion(self, system_prompt: str, user_prompt: str, max_tokens: int, log_to_langfuse_name: str = None) -> str:
         ...
-    
+
+    async def get_completion_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        response_model: Type[PydanticBaseModel],
+        log_to_langfuse_name: str = None
+    ) -> PydanticBaseModel:
+        ...
+
     def clean_and_parse_json(self, raw_json: str) -> Any:
         ...
 class BaseEvaluator(ABC):
@@ -186,7 +197,8 @@ class LLMJudge:
             **EXECUTION SUMMARY**:
             {execution_summary}
 
-            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools):
+            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools)
+            The agent is expected to primarily use tools from this MCP services, but not limited to them:
             {self._format_available_tools(available_tools)}
 
             ---""")
@@ -237,7 +249,7 @@ class LLMJudge:
             "   - Complete and accurate parameters (not just valid, but IDEAL)",
             "   - Zero redundancy (no repeated or unnecessary calls)",
             "   - Proper error handling (graceful recovery from ANY failure)",
-            "   - Efficient execution (parallel when possible, minimal rounds)",
+            "   - Efficient execution (parallel when possible, minimal rounds). Note: tools executed in one round are executed in parallel.",
             "   - Concise output (no verbose explanations unless requested)",
             "3. If ANY of the above is missing, that portion is NOT perfectly executed (counts as 0%)",
             "4. Example: Task completed correctly but with 1 redundant call = that portion is 0% perfect",
@@ -274,9 +286,11 @@ class LLMJudge:
             "- 8/20 tools optimal (60% defect rate) = Score 4",
             "",
             "Parallelism & Efficiency:",
+            "Important Constraints:",
+            "- Agents are capped at 10 tool calls per round to avoid exceeding the context window. Do NOT penalize an agent for splitting tool calls across multiple rounds when the total parallelizable set exceeds 10. Only penalize if the agent failed to parallelize tools that COULD fit within the 10-tool cap in a single round.",
+            "- transfer_to_agent calls is not an overhead, since every specilist agent has accsess to limited set of tools, and transfer_to_agent is used to transfer control between agents. Do NOT penalize transfer_to_agent calls, unless you see a loop of redundant transfer_to_agent calls with no progress.",
             "- 9/10 parallelizable tasks done in parallel (10% missed) = Score 9",
-            "- 8/10 parallelizable tasks done in parallel (20% missed) = Score 8",
-            "- 6/10 parallelizable tasks done in parallel (40% missed) = Score 6",
+            "- 8/10 parallelizable tasks done in parallel (20% missed) = Score 6",
             "- 4/10 parallelizable tasks done in parallel (60% missed) = Score 4",
             "",
             "Grounding:",
@@ -424,8 +438,8 @@ class LLMJudge:
             description = tool_info.get('description', 'No description available')
             if description is None:
                 description = 'No description available'
-            if len(description) > 500:
-                description = description[:500] + "..."
+            if len(description) > 200:
+                description = description[:200] + "..."
             
             servers[server].append({
                 'name': tool_name,
@@ -439,7 +453,8 @@ class LLMJudge:
             
             # Show ALL tools with descriptions for each server
             for tool in tools:
-                lines.append(f"  - {tool['name']}: {tool['description']}")
+                tool_description = str(tool['description'] or "").strip("`").strip()
+                lines.append(f"  - {tool['name']}: ```{tool_description}```")
             
             lines.append("")  # Empty line between servers
         
@@ -505,7 +520,8 @@ class LLMJudge:
             compressed = await self.llm.get_completion(
                 system_prompt,
                 user_prompt,
-                target_tokens
+                target_tokens,
+                log_to_langfuse_name="compress_for_judge"
             )
             
             compressed_tokens = len(compressed) // 4
@@ -519,6 +535,105 @@ class LLMJudge:
             if len(accumulated_info) > target_chars:
                 return accumulated_info[:target_chars] + "\n[Truncated for token limit]"
             return accumulated_info
+        
+    def _get_accumulated_information_from_execution_results(self, execution_results: List[Dict[str, Any]]) -> str:
+        # Group per round information, and insert into prompt format
+        execution_results_by_round = defaultdict(list)
+        for tool_result in execution_results:
+            round_num = tool_result.get("round", 0)
+            execution_results_by_round[round_num].append(tool_result)
+
+        # Calculate per-result character budget so the total stays under ~100K tokens
+        # (approximation: 4 chars ≈ 1 token → 100K tokens ≈ 400K chars)
+        total_budget_chars = 100_000 * 4
+        # Count total result entries including inner tool calls
+        num_results = 0
+        for tool_result in execution_results:
+            num_results += 1
+            num_results += len(tool_result.get("inner_tool_calls", []))
+        num_results = max(num_results, 1)
+        max_response_chars = total_budget_chars // num_results
+
+        # Format each round's information
+        formatted_rounds = []
+        for round_num in sorted(execution_results_by_round.keys()):
+            round_info = execution_results_by_round[round_num]
+            sub_agents_header_written = False
+            for tool_result in round_info:
+                inner_calls = tool_result.get("inner_tool_calls")
+                thread = tool_result.get("thread")
+
+                # Build round header
+                if inner_calls is not None:
+                    # Tools-mode: hierarchical format with optional thread label
+                    if thread:
+                        header = f"--- Round {round_num}, Thread {thread}: {tool_result.get('tool')} ---"
+                    else:
+                        header = f"--- Round {round_num}: {tool_result.get('tool')} ---"
+                    formatted_rounds.append(header)
+                    formatted_rounds.append(
+                        f"  Request: {json.dumps(tool_result.get('parameters', {}))}"
+                    )
+
+                    # Format inner tool calls grouped by sub_round
+                    inner_by_sub_round = defaultdict(list)
+                    for ic in inner_calls:
+                        sr = ic.get("sub_round", 0)
+                        inner_by_sub_round[sr].append(ic)
+
+                    for sr in sorted(inner_by_sub_round.keys()):
+                        formatted_rounds.append(f"  [Sub-round {sr}]")
+                        for ic in inner_by_sub_round[sr]:
+                            self._format_tool_entry(ic, formatted_rounds, max_response_chars, indent="    ")
+
+                    # Agent-tool overall result
+                    agent_response = self._extract_response_str(tool_result, max_response_chars)
+                    status = "succeeded" if tool_result.get("success", False) else "failed"
+                    formatted_rounds.append(f"  Agent result ({status}): {agent_response}")
+                else:
+                    # Legacy / sub_agents mode: one header per round, then list all tools
+                    if not sub_agents_header_written:
+                        formatted_rounds.append(f"--- Summary of Round {round_num} ---")
+                        sub_agents_header_written = True
+                    self._format_tool_entry(tool_result, formatted_rounds, max_response_chars)
+
+            formatted_rounds.append("")  # Empty line between rounds
+        
+        return "\n".join(formatted_rounds).strip()
+
+    @staticmethod
+    def _extract_response_str(tool_result: Dict[str, Any], max_chars: int) -> str:
+        """Extract and truncate response string from a tool result entry."""
+        if isinstance(tool_result.get('response'), dict):
+            resp_dict = tool_result.get('response', {})
+            response = resp_dict.get('output') or resp_dict.get('content') or resp_dict.get('structuredContent') or resp_dict
+        else:
+            response = tool_result.get('response', 'No response')
+        response_str = str(response)
+        if len(response_str) > max_chars:
+            response_str = response_str[:max_chars] + "... [truncated]"
+        return response_str
+
+    @staticmethod
+    def _format_tool_entry(tool_result: Dict[str, Any], lines: List[str],
+                           max_response_chars: int, indent: str = "") -> None:
+        """Format a single tool execution entry and append to *lines*."""
+        tool_info_text_parts = []
+        tool_info_text_parts.append(f"Tool `{tool_result.get('tool')}` with parameters {json.dumps(tool_result.get('parameters', {}))}")
+        if tool_result.get('server'):
+            tool_info_text_parts.append(f"on server {tool_result.get('server')}")
+
+        response_str = LLMJudge._extract_response_str(tool_result, max_response_chars)
+        tool_info_text_parts.append(f"{'succeeded' if tool_result.get('success', False) else 'failed'} with result: {response_str}")
+
+        if tool_result.get('compressed'):
+            before = tool_result.get('compression_tokens_before', 0)
+            after = tool_result.get('compression_tokens_after', 0)
+            tool_info_text_parts.append(
+                f"[Long result compressed, therefore, might be different from what MCP server/tool has returned originally. Compression {before}→{after} tokens]"
+            )
+
+        lines.append(f"{indent}{' '.join(tool_info_text_parts)}")
 
     async def evaluate_task_performance(self, task: str, final_solution: str, 
                                       execution_results: List[Dict[str, Any]], 
@@ -528,7 +643,9 @@ class LLMJudge:
                                       dependency_analysis: str = None) -> Dict[str, Any]:
         """Evaluate task performance using LLM judge with 10-dimension scoring"""
         
-        # Track the accumulated information to use (may be compressed if needed)
+        if not accumulated_information:
+            accumulated_information = self._get_accumulated_information_from_execution_results(execution_results)
+
         accumulated_info_to_use = accumulated_information
         
         # Retry loop for handling token limit errors
@@ -589,10 +706,12 @@ class LLMJudge:
                 
                 try:
                     llm_start_time = time.time()
-                    response = await self.llm.get_completion(
-                        "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.", 
-                        randomized_prompt, 
-                        config_loader.get_evaluation_max_tokens()
+                    parsed_eval = await self.llm.get_completion_structured(
+                        "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.",
+                        randomized_prompt,
+                        config_loader.get_evaluation_max_tokens(),
+                        JudgeEvaluation,
+                        log_to_langfuse_name=f"evaluation"
                     )
                     llm_end_time = time.time()
                     
@@ -685,8 +804,10 @@ class LLMJudge:
             
             ---
             
-            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools):
+            **AVAILABLE TOOLS** ({len(available_tools) if available_tools else 0} tools)
+            The agent is expected to primarily use tools from this MCP services, but not limited to them:
             {self._format_available_tools(available_tools)}
+
             {task_section}
             **EXECUTION SUMMARY**:
             {execution_summary}
@@ -798,6 +919,9 @@ class LLMJudge:
             - 8/20 tools optimal (60% defect rate) = Score 4
             
             Parallelism & Efficiency:
+            IMPORTANT: Agents are capped at 10 tool calls per round to avoid context window overflow.
+            Do NOT penalize splitting >10 parallelizable calls across multiple rounds — that is expected and correct behavior.
+            Only penalize failure to parallelize tools that could fit within a single 10-call round.
             - 9/10 parallelizable tasks done in parallel (10% missed) = Score 9
             - 8/10 parallelizable tasks done in parallel (20% missed) = Score 8
             - 6/10 parallelizable tasks done in parallel (40% missed) = Score 6
@@ -857,10 +981,12 @@ class LLMJudge:
             logger.debug(f"Starting single LLM judge evaluation for task: {task[:100]}...")
             
             llm_start_time = time.time()
-            response = await self.llm.get_completion(
-                "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.", 
-                prompt, 
-                15000
+            result = await self.llm.get_completion_structured(
+                "You are an expert AI task execution evaluator. Score each dimension objectively based on evidence.",
+                prompt,
+                15000,
+                JudgeEvaluation,
+                log_to_langfuse_name="evaluation"
             )
             llm_end_time = time.time()
             
@@ -936,6 +1062,11 @@ class LLMJudge:
         if not execution_results:
             summary_parts.append("No tools were executed.")
         else:
+            # Collect inner tool calls for statistics
+            all_inner = []
+            for r in execution_results:
+                all_inner.extend(r.get("inner_tool_calls", []))
+
             successful_tools = [r for r in execution_results if safe_get(r, 'success')]
             failed_tools = [r for r in execution_results if not safe_get(r, 'success')]
             
@@ -945,6 +1076,13 @@ class LLMJudge:
                 f"Successful: {len(successful_tools)}",
                 f"Failed: {len(failed_tools)}"
             ])
+
+            if all_inner:
+                inner_ok = [ic for ic in all_inner if ic.get("success")]
+                inner_fail = [ic for ic in all_inner if not ic.get("success")]
+                summary_parts.append(
+                    f"Inner tool executions: {len(all_inner)} (ok={len(inner_ok)}, fail={len(inner_fail)})"
+                )
             
             if successful_tools:
                 successful_tool_names = [safe_get(r, 'tool', 'unknown') for r in successful_tools]
@@ -991,6 +1129,7 @@ class TaskEvaluator(BaseEvaluator):
             planning_json_compliance: Pre-calculated planning JSON compliance from executor (optional)
             accumulated_information: Additional context from task execution (optional)
             concrete_task_description: Original concrete task description for evaluation reference (optional)
+            dependency_analysis: Task dependency analysis (optional)
             
         Returns:
             Dictionary containing all evaluation metrics
@@ -1122,10 +1261,22 @@ class TaskEvaluator(BaseEvaluator):
         server_counts = Counter()
         
         for result in execution_results:
-            server = safe_get(result, 'server', '')
-            if server:
-                servers_used.add(server)
-                server_counts[server] += 1
+            inner_calls = result.get('inner_tool_calls')
+            if inner_calls is not None:
+                # Tools routing mode: the outer entry is an agent-tool wrapper.
+                # Count MCP servers from the actual inner tool calls made by the
+                # specialist, not the synthetic "adk_agent_tool" pseudo-server.
+                for inner in inner_calls:
+                    server = safe_get(inner, 'server', '')
+                    if server:
+                        servers_used.add(server)
+                        server_counts[server] += 1
+            else:
+                # Sub-agents mode or a plain MCP call: use the outer server field.
+                server = safe_get(result, 'server', '')
+                if server:
+                    servers_used.add(server)
+                    server_counts[server] += 1
         
         return {
             'server_count': len(servers_used),
