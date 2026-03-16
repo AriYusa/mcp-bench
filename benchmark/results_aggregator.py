@@ -61,6 +61,11 @@ class ResultsAggregator:
         total_rounds = []
         tool_calls_counts = []
         
+        # Token usage tracking
+        total_output_tokens_list = []
+        total_prompt_tokens_list = []
+        total_tokens_list = []
+
         servers_used_counts = []
         cross_server_tasks = 0
         
@@ -130,6 +135,23 @@ class ResultsAggregator:
             
             if server_metrics.get('cross_server_coordination', False):
                 cross_server_tasks += 1
+
+            # Collect token usage
+            token_usage = result.get('token_usage', {})
+            if isinstance(token_usage, dict) and token_usage:
+                if 'completion_tokens' in token_usage:
+                    total_output_tokens_list.append(token_usage.get('completion_tokens', 0))
+                if 'prompt_tokens' in token_usage:
+                    total_prompt_tokens_list.append(token_usage.get('prompt_tokens', 0))
+                if 'total_tokens' in token_usage:
+                    total_tokens_list.append(token_usage.get('total_tokens', 0))
+            else:
+                if 'total_output_tokens' in result:
+                    total_output_tokens_list.append(result['total_output_tokens'])
+                if 'total_prompt_tokens' in result:
+                    total_prompt_tokens_list.append(result['total_prompt_tokens'])
+                if 'total_tokens' in result:
+                    total_tokens_list.append(result['total_tokens'])
         
         # LLM Judge combined score (average of 6 dimensions)
         llm_combined_scores = []
@@ -166,7 +188,10 @@ class ResultsAggregator:
                 'avg_agent_execution_time': self.safe_avg(agent_execution_times),
                 'avg_evaluation_time': self.safe_avg(evaluation_times),
                 'avg_total_rounds': self.safe_avg(total_rounds),
-                'avg_tool_calls_per_task': self.safe_avg(tool_calls_counts)
+                'avg_tool_calls_per_task': self.safe_avg(tool_calls_counts),
+                'avg_prompt_tokens': self.safe_avg(total_prompt_tokens_list),
+                'avg_completion_tokens': self.safe_avg(total_output_tokens_list),
+                'avg_total_tokens': self.safe_avg(total_tokens_list)
             },
             'server_utilization_metrics': {
                 'avg_servers_used': self.safe_avg(servers_used_counts),
@@ -394,7 +419,10 @@ class ResultsAggregator:
             'performance_metrics': {
                 'avg_execution_time': 0.0,
                 'avg_total_rounds': 0.0,
-                'avg_tool_calls_per_task': 0.0
+                'avg_tool_calls_per_task': 0.0,
+                'avg_prompt_tokens': 0.0,
+                'avg_completion_tokens': 0.0,
+                'avg_total_tokens': 0.0
             },
             'server_utilization_metrics': {
                 'avg_servers_used': 0.0,
